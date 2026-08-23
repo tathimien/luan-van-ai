@@ -1,15 +1,23 @@
+import difflib
 import io
 import json
 import os
 import re
-import docx
-import difflib
-from docx.enum.text import WD_COLOR_INDEX
-from docx.shared import Cm, Pt
-from pypdf import PdfReader
-import streamlit as st
+import unicodedata
+from collections import Counter
 
-# Thử import các SDK của Google Gemini
+import docx
+from docx.enum.text import WD_COLOR_INDEX
+from docx.oxml.text.paragraph import CT_P
+from docx.shared import Cm, Pt
+from docx.text.paragraph import Paragraph
+from pypdf import PdfReader
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
+
 try:
     from google import genai
 except ImportError:
@@ -20,50 +28,21 @@ try:
 except ImportError:
     genai_legacy = None
 
-# ---------------------------------------------------------
-# 1. CẤU HÌNH TRANG STREAMLIT & TIÊU ĐỀ
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="Đại học Y Hà Nội - Hệ thống Kiểm tra định dạng luận văn",
-    page_icon="🎓",
-    layout="wide"
-)
 
-col_logo, col_title = st.columns([1, 5])
+DEFAULT_RULES = {
+    "font_name": "Times New Roman",
+    "font_size": 13.0,
+    "line_spacing": 1.5,
+    "margin_top": 3.5,
+    "margin_bottom": 3.0,
+    "margin_left": 3.0,
+    "margin_right": 2.0,
+    "detailed_requirements": [
+        "Sử dụng thông số mặc định của Bộ môn do chưa phân tích được qua AI."
+    ],
+}
 
-with col_logo:
-    if os.path.exists("logo_hmu.png"):
-        st.image("logo_hmu.png", width=125)
-    else:
-        st.markdown("<h1 style='font-size: 80px; margin: 0;'>🎓</h1>", unsafe_allow_html=True)
 
-with col_title:
-    st.markdown(
-        """
-        <div style="line-height: 1.2; margin-top: 5px;">
-            <p style="font-size: 16px; font-weight: 600; color: #666666; margin: 0; text-transform: uppercase; letter-spacing: 0.5px;">
-                Trường Đại học Y Hà Nội
-            </p>
-            <h1 style="font-size: 28px; font-weight: 700; color: #ad171c; margin: 2px 0 8px 0; padding: 0;">
-                Trung tâm Khảo thí & ĐBCLGD — Bộ môn Mắt - Khúc xạ nhãn khoa
-            </h1>
-            <h3 style="font-size: 18px; font-weight: 500; color: #333333; margin: 0; padding: 0;">
-                🔬 Hệ thống Kiểm tra và Sửa định dạng Luận văn tự động
-            </h3>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-st.caption(
-    "Hệ thống tự động kiểm tra quy định, bảo toàn trang bìa/khung viền/logo, xử lý mục đạo đức nghiên cứu và chuẩn hóa file Word theo đúng quy chế."
-)
-
-API_KEY = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-
-# ---------------------------------------------------------
-# 2. HÀM ĐỌC TOÀN BỘ VĂN BẢN TỪ FILE PDF QUY ĐỊNH
-# ---------------------------------------------------------
 def extract_raw_text_from_pdf(pdf_path):
     if not os.path.exists(pdf_path):
         return ""
@@ -71,41 +50,33 @@ def extract_raw_text_from_pdf(pdf_path):
         reader = PdfReader(pdf_path)
         full_text = []
         for idx, page in enumerate(reader.pages):
-            txt = page.extract_text()
-            if txt:
-                full_text.append(f"--- TRANG {idx+1} ---\n{txt}")
+            text = page.extract_text()
+            if text:
+                full_text.append(f"--- TRANG {idx + 1} ---\n{text}")
         return "\n".join(full_text).strip()
-    except Exception as e:
-        st.error(f"Lỗi đọc file PDF: {e}")
+    except Exception as exc:
+        if st is not None:
+            st.error(f"Lỗi đọc file PDF: {exc}")
         return ""
 
-# ---------------------------------------------------------
-# 3. HÀM AI GEMINI PHÂN TÍCH PDF
-# ---------------------------------------------------------
-def analyze_rules_with_gemini(pdf_text, api_key):
-    default_rules = {
-        "font_name": "Times New Roman",
-        "font_size": 13.0,
-        "line_spacing": 1.5,
-        "margin_top": 3.5,
-        "margin_bottom": 3.0,
-        "margin_left": 3.0,
-        "margin_right": 2.0,
-        "detailed_requirements": [
-            "Sử dụng thông số mặc định của Bộ môn do chưa phân tích được qua AI."
-        ],
-    }
 
+def analyze_rules_with_gemini(pdf_text, api_key):
+    default_rules = dict(DEFAULT_RULES)
+    default_rules["detailed_requirements"] = list(
+        DEFAULT_RULES["detailed_requirements"]
+    )
     if not pdf_text or not api_key:
         return default_rules
 
     prompt = f"""
-Bạn là chuyên gia kiểm tra định dạng luận văn. Hãy đọc TOÀN BỘ văn bản quy định dưới đây và trích xuất thông số kỹ thuật chuẩn xác.
+Bạn là chuyên gia kiểm tra định dạng luận văn. Hãy đọc TOÀN BỘ văn bản quy
+định dưới đây và trích xuất thông số kỹ thuật chuẩn xác.
 
 NỘI DUNG FILE QUY ĐỊNH PDF:
 {pdf_text}
 
-Hãy trả về DUY NHẤT một chuỗi JSON thuần có cấu trúc sau (không dùng mã markdown):
+Hãy trả về DUY NHẤT một chuỗi JSON thuần có cấu trúc sau, không dùng mã
+Markdown:
 {{
   "font_name": "Times New Roman",
   "font_size": 13.0,
@@ -114,13 +85,14 @@ Hãy trả về DUY NHẤT một chuỗi JSON thuần có cấu trúc sau (khôn
   "margin_bottom": 3.0,
   "margin_left": 3.0,
   "margin_right": 2.0,
-  "detailed_requirements": [
-      "Trích xuất tất cả các quy định cụ thể tìm thấy trong PDF..."
-  ]
+  "detailed_requirements": ["Các quy định cụ thể tìm thấy trong PDF"]
 }}
 """
-
-    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    candidate_models = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
 
     for model_name in candidate_models:
         if genai is not None:
@@ -128,12 +100,16 @@ Hãy trả về DUY NHẤT một chuỗi JSON thuần có cấu trúc sau (khôn
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=prompt
+                    contents=prompt,
                 )
                 if response and response.text:
                     raw_text = response.text.strip()
-                    bt = chr(96) * 3
-                    clean_json = raw_text.replace(f"{bt}json", "").replace(bt, "").strip()
+                    fence = chr(96) * 3
+                    clean_json = (
+                        raw_text.replace(f"{fence}json", "")
+                        .replace(fence, "")
+                        .strip()
+                    )
                     return json.loads(clean_json)
             except Exception:
                 pass
@@ -145,102 +121,148 @@ Hãy trả về DUY NHẤT một chuỗi JSON thuần có cấu trúc sau (khôn
                 response = model.generate_content(prompt)
                 if response and response.text:
                     raw_text = response.text.strip()
-                    bt = chr(96) * 3
-                    clean_json = raw_text.replace(f"{bt}json", "").replace(bt, "").strip()
+                    fence = chr(96) * 3
+                    clean_json = (
+                        raw_text.replace(f"{fence}json", "")
+                        .replace(fence, "")
+                        .strip()
+                    )
                     return json.loads(clean_json)
             except Exception:
                 pass
 
     return default_rules
 
-# ---------------------------------------------------------
-# 4. HÀM TỐI ƯU & BẢO TOÀN TRANG BÌA (DÙNG ELEMENT XML GỐC)
-# ---------------------------------------------------------
+
 def optimize_cover_pages(doc):
     cover_errors = []
     cover_p_elements = set()
-
     cover_paragraphs = []
 
-    # 1. Thu thập các đoạn văn trong Bảng khung bìa
+    cover_table_keywords = [
+        "BỘ GIÁO DỤC",
+        "BỘ Y TẾ",
+        "TRƯỜNG ĐẠI HỌC",
+        "ĐẠI HỌC Y",
+        "LUẬN VĂN",
+        "LUẬN ÁN",
+        "KHÓA LUẬN",
+        "TÊN ĐỀ TÀI",
+        "NGƯỜI HƯỚNG DẪN",
+    ]
     for table in doc.tables[:2]:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    cover_paragraphs.append(p)
+        table_text = " ".join(
+            cell.text.upper()
+            for row in table.rows
+            for cell in row.cells
+        )
+        if any(word in table_text for word in cover_table_keywords):
+            for row in table.rows:
+                for cell in row.cells:
+                    cover_paragraphs.extend(cell.paragraphs)
 
-    # 2. Thu thập các đoạn văn thuộc 2 trang đầu
-    sections_p = [[]]
-    for p in doc.paragraphs:
-        sections_p[-1].append(p)
-        xml = p._element.xml
-        is_break = "\x0c" in p.text or ('w:br' in xml and 'type="page"' in xml) or ('w:sectPr' in xml)
+    page_groups = [[]]
+    page_break_count = 0
+    for paragraph in doc.paragraphs:
+        page_groups[-1].append(paragraph)
+        xml = paragraph._element.xml
+        is_break = (
+            "\x0c" in paragraph.text
+            or ("w:br" in xml and 'type="page"' in xml)
+            or "w:sectPr" in xml
+        )
         if is_break:
-            sections_p.append([])
-            if len(sections_p) > 2:
+            page_break_count += 1
+            page_groups.append([])
+            if page_break_count >= 2:
                 break
 
-    for idx_cover in range(min(2, len(sections_p))):
-        for p in sections_p[idx_cover]:
-            cover_paragraphs.append(p)
+    if page_break_count >= 2:
+        for page_index in range(2):
+            cover_paragraphs.extend(page_groups[page_index])
+    else:
+        # DOCX không lưu các ngắt trang do Word tự dàn trang. Nếu không
+        # có đủ hai ngắt trang thủ công, tuyệt đối không coi toàn bộ luận
+        # văn là trang bìa vì như vậy hình trong thân bài sẽ bị bỏ qua.
+        body_start_keywords = [
+            "LỜI CAM ĐOAN",
+            "LỜI CẢM ƠN",
+            "MỤC LỤC",
+            "DANH MỤC",
+            "ĐẶT VẤN ĐỀ",
+            "TỔNG QUAN",
+            "CHƯƠNG 1",
+            "CHAPTER 1",
+            "INTRODUCTION",
+        ]
+        for paragraph in doc.paragraphs[:25]:
+            heading = paragraph.text.upper().strip()
+            if any(
+                heading.startswith(keyword)
+                for keyword in body_start_keywords
+            ):
+                break
+            cover_paragraphs.append(paragraph)
 
-    # 3. Đánh dấu danh sách paragraph thuộc Trang Bìa
-    for p in cover_paragraphs:
-        cover_p_elements.add(p._element)
-        p.paragraph_format.line_spacing = 1.0
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(1)
-
-        if not p.text.strip():
-            for run in p.runs:
+    for paragraph in cover_paragraphs:
+        cover_p_elements.add(paragraph._element)
+        paragraph.paragraph_format.line_spacing = 1.0
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(1)
+        if not paragraph.text.strip():
+            if not paragraph.runs:
+                paragraph.add_run()
+            for run in paragraph.runs:
                 run.font.size = Pt(6)
-            if not p.runs:
-                r = p.add_run()
-                r.font.size = Pt(6)
 
     cover_errors.append(
-        "🖼️ **Bảo toàn Trang Bìa & Logo:** Đã giữ nguyên khung viền, logo trường, co nhỏ dòng trống (6pt) & cố định trang bìa gọn gàng!"
+        "🖼️ **Bảo toàn Trang Bìa & Logo:** Đã giữ nguyên khung viền, "
+        "logo trường, co nhỏ dòng trống (6pt) và cố định trang bìa."
     )
-
     return cover_errors, cover_p_elements
 
-# ---------------------------------------------------------
-# 5. HÀM NHẬN BIẾT BỨC ẢNH CÓ PHẢI LÀ LOGO / TRANG BÌA KHÔNG
-# ---------------------------------------------------------
-def is_cover_or_logo_image(p_idx, p, cover_p_elements, paragraphs):
-    if p._element in cover_p_elements:
+
+def is_cover_or_logo_image(p_idx, paragraph, cover_p_elements, paragraphs):
+    if paragraph._element in cover_p_elements:
         return True
 
-    if p_idx < 30:
-        context_text = ""
-        start_k = max(0, p_idx - 6)
-        end_k = min(len(paragraphs), p_idx + 7)
-        for k in range(start_k, end_k):
-            context_text += " " + paragraphs[k].text.upper()
-
+    if p_idx < 25:
+        start_index = max(0, p_idx - 6)
+        end_index = min(len(paragraphs), p_idx + 7)
+        context_text = " ".join(
+            paragraphs[index].text.upper()
+            for index in range(start_index, end_index)
+        )
         cover_keywords = [
-            "BỘ GIÁO DỤC", "BỘ Y TẾ", "TRƯỜNG ĐẠI HỌC", "ĐẠI HỌC Y", 
-            "LUẬN VĂN", "LUẬN ÁN", "KHÓA LUẬN", "BÁO CÁO", "TÊN ĐỀ TÀI",
-            "NGƯỜI HƯỚNG DẪN", "HÀ NỘI"
+            "BỘ GIÁO DỤC",
+            "BỘ Y TẾ",
+            "TRƯỜNG ĐẠI HỌC",
+            "ĐẠI HỌC Y",
+            "LUẬN VĂN",
+            "LUẬN ÁN",
+            "KHÓA LUẬN",
+            "TÊN ĐỀ TÀI",
+            "NGƯỜI HƯỚNG DẪN",
         ]
-        if any(kw in context_text for kw in cover_keywords):
+        cover_score = sum(
+            keyword in context_text for keyword in cover_keywords
+        )
+        if cover_score >= 2:
             return True
-
     return False
 
-# ---------------------------------------------------------
-# 6. HÀM LẤY ĐỊNH DẠNG MẪU TỪ CÁC MỤC 2.1, 2.2, 2.3
-# ---------------------------------------------------------
+
 def get_reference_heading_format(doc):
     ref_pattern = re.compile(r"^\s*2\.[1-3]\.?", re.IGNORECASE)
-    for p in doc.paragraphs:
-        if ref_pattern.search(p.text.strip()):
+    for paragraph in doc.paragraphs:
+        if ref_pattern.search(paragraph.text.strip()):
+            fmt = paragraph.paragraph_format
             return {
-                "left_indent": p.paragraph_format.left_indent,
-                "first_line_indent": p.paragraph_format.first_line_indent,
-                "alignment": p.paragraph_format.alignment,
-                "space_before": p.paragraph_format.space_before,
-                "space_after": p.paragraph_format.space_after,
+                "left_indent": fmt.left_indent,
+                "first_line_indent": fmt.first_line_indent,
+                "alignment": fmt.alignment,
+                "space_before": fmt.space_before,
+                "space_after": fmt.space_after,
             }
     return {
         "left_indent": Pt(0),
@@ -250,306 +272,502 @@ def get_reference_heading_format(doc):
         "space_after": Pt(3),
     }
 
-# ---------------------------------------------------------
-# 7. HÀM SỬA & HIGHLIGHT MỤC 2.4 (VẤN ĐỀ ĐẠO ĐỨC)
-# ---------------------------------------------------------
+
 def fix_ethics_section(doc):
     detailed_errors = []
     ethics_pattern = re.compile(
-        r"(2\.\d+\.?\s*)?(vấn đề đạo đức trong nghiên cứu|đạo đức trong nghiên cứu)", 
-        re.IGNORECASE
+        r"(2\.\d+\.?\s*)?"
+        r"(vấn đề đạo đức trong nghiên cứu|đạo đức trong nghiên cứu)",
+        re.IGNORECASE,
     )
     ref_fmt = get_reference_heading_format(doc)
 
-    def apply_heading_format(p):
-        p.paragraph_format.left_indent = ref_fmt["left_indent"]
-        p.paragraph_format.first_line_indent = ref_fmt["first_line_indent"]
+    def apply_heading_format(paragraph):
+        fmt = paragraph.paragraph_format
+        fmt.left_indent = ref_fmt["left_indent"]
+        fmt.first_line_indent = ref_fmt["first_line_indent"]
         if ref_fmt["alignment"] is not None:
-            p.paragraph_format.alignment = ref_fmt["alignment"]
+            fmt.alignment = ref_fmt["alignment"]
         if ref_fmt["space_before"] is not None:
-            p.paragraph_format.space_before = ref_fmt["space_before"]
+            fmt.space_before = ref_fmt["space_before"]
         if ref_fmt["space_after"] is not None:
-            p.paragraph_format.space_after = ref_fmt["space_after"]
+            fmt.space_after = ref_fmt["space_after"]
 
-    for idx, p in enumerate(list(doc.paragraphs)):
-        text = p.text
+    for idx, paragraph in enumerate(list(doc.paragraphs)):
+        text = paragraph.text
         if not text.strip():
             continue
-
         match = ethics_pattern.search(text)
-        if match:
-            start_pos = match.start()
-            matched_text = match.group(0)
+        if not match:
+            continue
 
-            if start_pos > 0 and text[:start_pos].strip() != "":
-                detailed_errors.append(
-                    f"⚠️ **Đoạn {idx+1}:** Mục `{matched_text}` bị dính câu trước ➡️ **Đã ngắt dòng, in đậm, căn lề thẳng hàng 2.1-2.3 và HIGHLIGHT màu vàng.**"
-                )
-                text_before = text[:start_pos].rstrip()
-                text_after = text[start_pos:].lstrip()
-
-                p.text = text_before
-
-                new_p = doc.add_paragraph()
-                p._p.addnext(new_p._p)
-
-                r_title = new_p.add_run(matched_text)
-                r_title.bold = True
-                r_title.font.highlight_color = WD_COLOR_INDEX.YELLOW
-                apply_heading_format(new_p)
-
-                rest_text = text_after[len(matched_text):]
-                if rest_text:
-                    r_rest = new_p.add_run(rest_text)
-                    r_rest.bold = False
-
-            else:
-                apply_heading_format(p)
-                detailed_errors.append(
-                    f"📏 **Mục `{matched_text}`:** Đã căn thẳng hàng 100% với 2.1, 2.2, 2.3 và **HIGHLIGHT màu vàng**."
-                )
-                p.text = ""
-                r_title = p.add_run(matched_text)
-                r_title.bold = True
-                r_title.font.highlight_color = WD_COLOR_INDEX.YELLOW
-                rest_text = text[len(matched_text):]
-                if rest_text:
-                    r_rest = p.add_run(rest_text)
-                    r_rest.bold = False
-
+        start_pos = match.start()
+        matched_text = match.group(0)
+        if start_pos > 0 and text[:start_pos].strip():
+            detailed_errors.append(
+                f"⚠️ **Đoạn {idx + 1}:** Mục {matched_text} bị dính câu "
+                "trước. Đã ngắt dòng, in đậm, căn lề và bôi vàng."
+            )
+            text_before = text[:start_pos].rstrip()
+            text_after = text[start_pos:].lstrip()
+            paragraph.text = text_before
+            new_paragraph = doc.add_paragraph()
+            paragraph._p.addnext(new_paragraph._p)
+            title_run = new_paragraph.add_run(matched_text)
+            title_run.bold = True
+            title_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            apply_heading_format(new_paragraph)
+            rest_text = text_after[len(matched_text) :]
+            if rest_text:
+                rest_run = new_paragraph.add_run(rest_text)
+                rest_run.bold = False
+        else:
+            apply_heading_format(paragraph)
+            detailed_errors.append(
+                f"📏 **Mục {matched_text}:** Đã căn thẳng hàng với "
+                "2.1, 2.2, 2.3 và bôi vàng."
+            )
+            paragraph.text = ""
+            title_run = paragraph.add_run(matched_text)
+            title_run.bold = True
+            title_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            rest_text = text[len(matched_text) :]
+            if rest_text:
+                rest_run = paragraph.add_run(rest_text)
+                rest_run.bold = False
     return detailed_errors
 
-# ---------------------------------------------------------
-# 8. HÀM ÉP IN ĐẬM & HIGHLIGHT TÊN ĐỀ TÀI
-# ---------------------------------------------------------
-def enforce_bold_for_thesis_title(p):
-    text_lower = p.text.lower().strip()
+
+def enforce_bold_for_thesis_title(paragraph):
+    text_lower = paragraph.text.lower().strip()
     is_title = (
         "tên đề tài" in text_lower
         or text_lower.startswith("đề tài:")
         or text_lower.startswith("đề tài :")
-        or "tên đề tài:" in text_lower
     )
     if is_title:
-        for run in p.runs:
+        for run in paragraph.runs:
             run.bold = True
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
         return True
     return False
 
-# ---------------------------------------------------------
-# ---------------------------------------------------------
-# HÀM BẢO TOÀN ĐỊNH DẠNG KHI THAY ĐỔI VĂN BẢN TRONG ĐOẠN 
-# ---------------------------------------------------------
-def set_paragraph_text_preserve_formatting(p, new_text, highlight_changes=False, missing_year_ranges=None):
-    char_map = []
-    for run in p.runs:
-        b = bool(run.bold) if run.bold is not None else False
-        i = bool(run.italic) if run.italic is not None else False
-        sup = bool(run.font.superscript) if run.font.superscript is not None else False
-        sub = bool(run.font.subscript) if run.font.subscript is not None else False
-        hl = run.font.highlight_color
-        fn = run.font.name
-        fs = run.font.size
-        for ch in run.text:
-            char_map.append((ch, b, i, sup, sub, fn, fs, hl))
 
-    if not char_map or not new_text:
-        p.text = new_text
+def _style_from_run(run):
+    return (
+        bool(run.bold) if run.bold is not None else False,
+        bool(run.italic) if run.italic is not None else False,
+        bool(run.font.superscript)
+        if run.font.superscript is not None
+        else False,
+        bool(run.font.subscript) if run.font.subscript is not None else False,
+        run.font.name,
+        run.font.size,
+        run.font.highlight_color,
+    )
+
+
+def _paragraph_char_records(paragraph):
+    records = []
+    for run in paragraph.runs:
+        style = _style_from_run(run)
+        records.extend((char, style) for char in run.text)
+    return records
+
+
+def _style_with(style, superscript=None, subscript=None, highlight=None):
+    values = list(style)
+    if superscript is not None:
+        values[2] = superscript
+    if subscript is not None:
+        values[3] = subscript
+    if highlight is not None:
+        values[6] = highlight
+    return tuple(values)
+
+
+def _apply_style(run, style):
+    run.bold = style[0]
+    run.italic = style[1]
+    run.font.superscript = style[2]
+    run.font.subscript = style[3]
+    if style[4]:
+        run.font.name = style[4]
+    if style[5]:
+        run.font.size = style[5]
+    if style[6] is not None:
+        run.font.highlight_color = style[6]
+
+
+def _rebuild_paragraph(paragraph, records):
+    paragraph.text = ""
+    if not records:
         return
 
-    matcher = difflib.SequenceMatcher(None, p.text, new_text)
-    new_char_map = []
+    current_style = records[0][1]
+    current_text = ""
+    for char, style in records:
+        if style == current_style:
+            current_text += char
+        else:
+            run = paragraph.add_run(current_text)
+            _apply_style(run, current_style)
+            current_text = char
+            current_style = style
+    if current_text:
+        run = paragraph.add_run(current_text)
+        _apply_style(run, current_style)
 
+
+def set_paragraph_text_preserve_formatting(
+    paragraph,
+    new_text,
+    highlight_changes=False,
+    highlight_ranges=None,
+):
+    old_text = paragraph.text
+    old_records = _paragraph_char_records(paragraph)
+    if not old_records or not new_text:
+        paragraph.text = new_text
+        return
+
+    default_style = old_records[-1][1]
+    matcher = difflib.SequenceMatcher(None, old_text, new_text)
+    new_records = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            new_char_map.extend(char_map[i1:i2])
-        elif tag == "replace":
-            ref_fmt = list(char_map[i1] if i1 < len(char_map) else char_map[-1])
-            if highlight_changes:
-                ref_fmt[7] = WD_COLOR_INDEX.YELLOW  # Chỉ bôi vàng đoạn thay thế
-            for _ in range(j2 - j1):
-                new_char_map.append(tuple(ref_fmt))
-        elif tag == "insert":
-            ref_idx = max(0, i1 - 1)
-            ref_fmt = list(char_map[ref_idx] if ref_idx < len(char_map) else char_map[-1])
-            if highlight_changes:
-                ref_fmt[7] = WD_COLOR_INDEX.YELLOW  # Chỉ bôi vàng đoạn thêm mới
-            for _ in range(j2 - j1):
-                new_char_map.append(tuple(ref_fmt))
-        elif tag == "delete":
-            pass
+            new_records.extend(old_records[i1:i2])
+            continue
+        if tag == "delete":
+            continue
 
-    # Bôi vàng chữ "và cộng sự" bị thiếu năm
-    if missing_year_ranges:
-        for start, end in missing_year_ranges:
-            for idx in range(start, end):
-                if idx < len(new_char_map):
-                    fmt = list(new_char_map[idx])
-                    fmt[7] = WD_COLOR_INDEX.YELLOW
-                    new_char_map[idx] = tuple(fmt)
+        source_index = min(i1, len(old_records) - 1)
+        if tag == "insert" and i1 > 0:
+            source_index = i1 - 1
+        style = old_records[source_index][1] if old_records else default_style
+        if highlight_changes:
+            style = _style_with(style, highlight=WD_COLOR_INDEX.YELLOW)
+        new_records.extend((char, style) for char in new_text[j1:j2])
 
-    p.text = ""
-    if len(new_char_map) != len(new_text):
-        p.text = new_text
+    if len(new_records) != len(new_text):
+        paragraph.text = new_text
         return
 
-    curr_str = ""
-    curr_fmt = new_char_map[0]
-
-    for ch, fmt in zip(new_text, new_char_map):
-        if fmt[1:] == curr_fmt[1:]:
-            curr_str += ch
+    for item in highlight_ranges or []:
+        if len(item) == 3:
+            start, end, highlight_color = item
         else:
-            r = p.add_run(curr_str)
-            r.bold, r.italic, r.font.superscript, r.font.subscript = curr_fmt[1], curr_fmt[2], curr_fmt[3], curr_fmt[4]
-            if curr_fmt[5]: r.font.name = curr_fmt[5]
-            if curr_fmt[6]: r.font.size = curr_fmt[6]
-            if curr_fmt[7]: r.font.highlight_color = curr_fmt[7]
-            
-            curr_str = ch
-            curr_fmt = fmt
+            start, end = item
+            highlight_color = WD_COLOR_INDEX.YELLOW
+        for index in range(max(0, start), min(end, len(new_records))):
+            char, style = new_records[index]
+            new_records[index] = (
+                char,
+                _style_with(style, highlight=highlight_color),
+            )
+    _rebuild_paragraph(paragraph, new_records)
 
-    if curr_str:
-        r = p.add_run(curr_str)
-        r.bold, r.italic, r.font.superscript, r.font.subscript = curr_fmt[1], curr_fmt[2], curr_fmt[3], curr_fmt[4]
-        if curr_fmt[5]: r.font.name = curr_fmt[5]
-        if curr_fmt[6]: r.font.size = curr_fmt[6]
-        if curr_fmt[7]: r.font.highlight_color = curr_fmt[7]
-# ---------------------------------------------------------
-# 9. HÀM ĐỔI TRÍCH DẪN [1] THÀNH LŨY THỪA (BẢO TOÀN LŨY THỪA CÓ SẴN)
-# ---------------------------------------------------------
-def _add_mapped_runs(p, sub_text, sub_map, font_target, size_target):
-    if not sub_text or not sub_map:
-        return
-    curr_str = ""
-    curr_bold = sub_map[0][1]
-    curr_italic = sub_map[0][2]
-    curr_super = sub_map[0][3]
-    curr_sub = sub_map[0][4]
 
-    for ch, (_, b, i, sup, sub) in zip(sub_text, sub_map):
-        if b == curr_bold and i == curr_italic and sup == curr_super and sub == curr_sub:
-            curr_str += ch
-        else:
-            r = p.add_run(curr_str)
-            r.bold = curr_bold
-            r.italic = curr_italic
-            r.font.superscript = curr_super
-            r.font.subscript = curr_sub
-            r.font.name = font_target
-            if not curr_super:
-                r.font.size = Pt(size_target)
-            curr_str = ch
-            curr_bold = b
-            curr_italic = i
-            curr_super = sup
-            curr_sub = sub
-
-    if curr_str:
-        r = p.add_run(curr_str)
-        r.bold = curr_bold
-        r.italic = curr_italic
-        r.font.superscript = curr_super
-        r.font.subscript = curr_sub
-        r.font.name = font_target
-        if not curr_super:
-            r.font.size = Pt(size_target)
-
-def convert_brackets_to_superscript(p, font_target, size_target):
-    text = p.text
-    if not text or "[" not in text or "]" not in text:
+def highlight_paragraph_ranges(
+    paragraph,
+    ranges,
+    highlight_color=WD_COLOR_INDEX.YELLOW,
+    preserve_existing=True,
+):
+    records = _paragraph_char_records(paragraph)
+    if not records:
         return False
 
-    pattern = r"(\[\d+(?:[\s,–-]\d+)*\])"
-    matches = list(re.finditer(pattern, text))
-    if not matches:
-        return False
+    changed = False
+    for start, end in _merge_ranges(ranges):
+        for index in range(max(0, start), min(end, len(records))):
+            char, style = records[index]
+            if preserve_existing and style[6] is not None:
+                continue
+            records[index] = (
+                char,
+                _style_with(style, highlight=highlight_color),
+            )
+            changed = True
+    if changed:
+        _rebuild_paragraph(paragraph, records)
+    return changed
 
-    # Lấy bản đồ định dạng cho TẤT CẢ các thuộc tính bao gồm LŨY THỪA (superscript)
-    char_map = []
-    for run in p.runs:
-        r_bold = bool(run.bold)
-        r_italic = bool(run.italic)
-        r_super = bool(run.font.superscript)
-        r_sub = bool(run.font.subscript)
-        for ch in run.text:
-            char_map.append((ch, r_bold, r_italic, r_super, r_sub))
 
-    if len(char_map) != len(text):
-        char_map = [(ch, False, False, False, False) for ch in text]
+NUMERIC_CITATION_CONTENT = r"\d+(?:\s*[,;–—-]\s*\d+)*"
+NUMERIC_CITATION_PATTERN = re.compile(
+    rf"(?:\[\s*{NUMERIC_CITATION_CONTENT}\s*\])"
+    rf"(?:\s*[,;]?\s*\[\s*{NUMERIC_CITATION_CONTENT}\s*\])*"
+)
+NUMERIC_CITATION_ITEM_PATTERN = re.compile(
+    rf"\[\s*({NUMERIC_CITATION_CONTENT})\s*\]"
+)
+SENTENCE_PUNCTUATION = ".!?"
+SUPERSCRIPT_CITATION_CHARS = set("0123456789,;–—- ")
 
-    # Kiểm tra xem có trích dẫn ngoặc vuông nào CHƯA phải lũy thừa không
-    needs_conversion = False
-    for match in matches:
-        start, end = match.span()
-        if not all(char_map[k][3] for k in range(start, end)):
-            needs_conversion = True
+
+def _is_superscript_citation_record(record):
+    char, style = record
+    return style[2] and char in SUPERSCRIPT_CITATION_CHARS
+
+
+def _highlight_record(record):
+    char, style = record
+    return (
+        char,
+        _style_with(style, highlight=WD_COLOR_INDEX.YELLOW),
+    )
+
+
+def _highlight_superscript_record(record):
+    char, style = record
+    return (
+        char,
+        _style_with(
+            style,
+            superscript=True,
+            subscript=False,
+            highlight=WD_COLOR_INDEX.YELLOW,
+        ),
+    )
+
+
+def normalize_numeric_citations(paragraph, font_target, size_target):
+    """
+    Chuyển [1], [1-3], [1, 2] thành số lũy thừa và đặt số sau dấu chấm.
+
+    Ví dụ:
+        Nội dung [1].  -> Nội dung.¹
+        Nội dung. [2] -> Nội dung.²
+    """
+    text = paragraph.text
+    records = _paragraph_char_records(paragraph)
+    matches = list(NUMERIC_CITATION_PATTERN.finditer(text))
+    converted_count = len(matches)
+    moved_count = 0
+
+    if records and matches:
+        rebuilt = []
+        cursor = 0
+        for match in matches:
+            rebuilt.extend(records[cursor : match.start()])
+
+            after_index = match.end()
+            while after_index < len(text) and text[after_index].isspace():
+                after_index += 1
+
+            punctuation_after = (
+                after_index < len(text)
+                and text[after_index] in SENTENCE_PUNCTUATION
+            )
+            previous_nonspace = match.start() - 1
+            while previous_nonspace >= 0 and text[previous_nonspace].isspace():
+                previous_nonspace -= 1
+            punctuation_before = (
+                previous_nonspace >= 0
+                and text[previous_nonspace] in SENTENCE_PUNCTUATION
+            )
+            citation_at_end = after_index >= len(text)
+
+            while rebuilt and rebuilt[-1][0].isspace():
+                rebuilt.pop()
+
+            if punctuation_after:
+                # Bôi vàng cả dấu chấm vừa được đưa ra trước số trích dẫn.
+                punctuation_record = _highlight_record(
+                    records[after_index]
+                )
+                rebuilt.append(punctuation_record)
+                cursor = after_index + 1
+                moved_count += 1
+            else:
+                cursor = match.end()
+                if citation_at_end and not punctuation_before:
+                    base_style = (
+                        rebuilt[-1][1]
+                        if rebuilt
+                        else records[match.start()][1]
+                    )
+                    normal_style = _style_with(
+                        base_style,
+                        superscript=False,
+                        subscript=False,
+                        highlight=WD_COLOR_INDEX.YELLOW,
+                    )
+                    rebuilt.append((".", normal_style))
+                    moved_count += 1
+                elif punctuation_before and rebuilt:
+                    # Trường hợp đã viết ". [1]": bôi vàng dấu chấm
+                    # cùng với số lũy thừa để người dùng thấy chỗ sửa.
+                    rebuilt[-1] = _highlight_record(rebuilt[-1])
+
+            # Gộp [1],[2], [1] [2] hoặc [1,2] thành một cụm 1,2.
+            citation_parts = []
+            for item in NUMERIC_CITATION_ITEM_PATTERN.finditer(
+                match.group(0)
+            ):
+                normalized_item = re.sub(
+                    r"\s*([,;–—-])\s*",
+                    r"\1",
+                    item.group(1),
+                )
+                citation_parts.append(normalized_item)
+            citation_text = ",".join(citation_parts)
+            citation_style = _style_with(
+                records[match.start()][1],
+                superscript=True,
+                subscript=False,
+                highlight=WD_COLOR_INDEX.YELLOW,
+            )
+            if font_target:
+                citation_style = (
+                    citation_style[0],
+                    citation_style[1],
+                    citation_style[2],
+                    citation_style[3],
+                    font_target,
+                    Pt(size_target),
+                    citation_style[6],
+                )
+            rebuilt.extend((char, citation_style) for char in citation_text)
+
+        rebuilt.extend(records[cursor:])
+        records = rebuilt
+
+    if not records:
+        return {
+            "converted": 0,
+            "moved_after_period": 0,
+            "changed": False,
+        }
+
+    normalized = []
+    index = 0
+    while index < len(records):
+        if not _is_superscript_citation_record(records[index]):
+            normalized.append(records[index])
+            index += 1
+            continue
+
+        end_index = index
+        has_digit = False
+        while True:
+            while (
+                end_index < len(records)
+                and _is_superscript_citation_record(records[end_index])
+            ):
+                has_digit = (
+                    has_digit or records[end_index][0].isdigit()
+                )
+                end_index += 1
+
+            # Word có thể tách dấu phẩy thành một run thường:
+            # số ¹ (superscript), dấu phẩy (normal), số ² (superscript).
+            # Vẫn phải coi toàn bộ ¹,² là một cụm trích dẫn.
+            candidate_index = end_index
+            while (
+                candidate_index < len(records)
+                and (
+                    records[candidate_index][0].isspace()
+                    or records[candidate_index][0] in ",;"
+                )
+            ):
+                candidate_index += 1
+
+            if (
+                candidate_index < len(records)
+                and _is_superscript_citation_record(
+                    records[candidate_index]
+                )
+                and records[candidate_index][0].isdigit()
+            ):
+                end_index = candidate_index
+                continue
             break
 
-    # Nếu tất cả trích dẫn ngoặc vuông ĐÃ LÀ LŨY THỪA RỒI -> Bỏ qua, bảo toàn nguyên vẹn
-    if not needs_conversion:
+        next_index = end_index
+        while next_index < len(records) and records[next_index][0].isspace():
+            next_index += 1
+
+        if (
+            has_digit
+            and next_index < len(records)
+            and records[next_index][0] in SENTENCE_PUNCTUATION
+            and not records[next_index][1][2]
+        ):
+            while normalized and normalized[-1][0].isspace():
+                normalized.pop()
+            normalized.append(_highlight_record(records[next_index]))
+            normalized.extend(
+                _highlight_superscript_record(record)
+                for record in records[index:end_index]
+                if not record[0].isspace()
+            )
+            index = next_index + 1
+            moved_count += 1
+        else:
+            normalized.extend(records[index:end_index])
+            index = end_index
+
+    old_signature = [
+        (char, style[2], style[6]) for char, style in _paragraph_char_records(paragraph)
+    ]
+    new_signature = [(char, style[2], style[6]) for char, style in normalized]
+    changed = old_signature != new_signature
+    if changed:
+        _rebuild_paragraph(paragraph, normalized)
+
+    return {
+        "converted": converted_count,
+        "moved_after_period": moved_count,
+        "changed": changed,
+    }
+
+
+def convert_brackets_to_superscript(paragraph, font_target, size_target):
+    result = normalize_numeric_citations(
+        paragraph,
+        font_target,
+        size_target,
+    )
+    return result["changed"]
+
+
+def clean_spaces_and_punctuation(paragraph):
+    if not paragraph.runs:
         return False
 
-    p.text = ""
-    pos = 0
-    for match in matches:
-        start, end = match.span()
-        if start > pos:
-            _add_mapped_runs(p, text[pos:start], char_map[pos:start], font_target, size_target)
-
-        num_str = match.group(1)[1:-1]
-        match_bold = char_map[start][1] if start < len(char_map) else False
-        match_italic = char_map[start][2] if start < len(char_map) else False
-
-        r = p.add_run(num_str)
-        r.font.superscript = True
-        r.font.highlight_color = WD_COLOR_INDEX.YELLOW
-        r.bold = match_bold
-        r.italic = match_italic
-        r.font.name = font_target
-        r.font.size = Pt(size_target)
-
-        pos = end
-
-    if pos < len(text):
-        _add_mapped_runs(p, text[pos:], char_map[pos:], font_target, size_target)
-
-    return True
-
-# ---------------------------------------------------------
-# 10. HÀM XÓA KHOẢNG TRẮNG DƯ THỪA
-# ---------------------------------------------------------
-def clean_spaces_and_punctuation(p):
-    if not p.runs:
-        return False
-
-    text_upper = p.text.upper()
-    cover_keywords = ["BỘ GIÁO DỤC", "BỘ Y TẾ", "TRƯỜNG ĐẠI HỌC", "VIỆN NGHIÊN CỨU", "UBND"]
+    text_upper = paragraph.text.upper()
+    cover_keywords = [
+        "BỘ GIÁO DỤC",
+        "BỘ Y TẾ",
+        "TRƯỜNG ĐẠI HỌC",
+        "VIỆN NGHIÊN CỨU",
+        "UBND",
+    ]
     if any(keyword in text_upper for keyword in cover_keywords):
         return False
 
     changed = False
-    for run in p.runs:
+    for run in paragraph.runs:
         if not run.text:
             continue
-        orig = run.text
-        cleaned = orig.replace("\xa0", " ").replace("\u200b", "")
+        original = run.text
+        cleaned = original.replace("\xa0", " ").replace("\u200b", "")
         cleaned = re.sub(r" {2,}", " ", cleaned)
-        cleaned = re.sub(r"\s+([:,.,!?,])", r"\1", cleaned)
-
-        if cleaned != orig:
+        cleaned = re.sub(r"\s+([:,.!?])", r"\1", cleaned)
+        if cleaned != original:
             run.text = cleaned
             changed = True
 
-    runs_with_text = [r for r in p.runs if r.text]
-    for idx in range(len(runs_with_text) - 1):
-        curr_run = runs_with_text[idx]
-        next_run = runs_with_text[idx + 1]
+    runs_with_text = [run for run in paragraph.runs if run.text]
+    for index in range(len(runs_with_text) - 1):
+        current_run = runs_with_text[index]
+        next_run = runs_with_text[index + 1]
         while (
-            curr_run.text
+            current_run.text
             and next_run.text
-            and curr_run.text[-1] == " "
+            and current_run.text[-1] == " "
             and next_run.text[0] == " "
         ):
             next_run.text = next_run.text[1:]
@@ -558,107 +776,966 @@ def clean_spaces_and_punctuation(p):
     if runs_with_text:
         first_run = runs_with_text[0]
         last_run = runs_with_text[-1]
-        l_stripped = first_run.text.lstrip(" \t\xa0")
-        if l_stripped != first_run.text:
-            first_run.text = l_stripped
+        left_stripped = first_run.text.lstrip(" \t\xa0")
+        if left_stripped != first_run.text:
+            first_run.text = left_stripped
             changed = True
-        r_stripped = last_run.text.rstrip(" \t\xa0")
-        if r_stripped != last_run.text:
-            last_run.text = r_stripped
+        right_stripped = last_run.text.rstrip(" \t\xa0")
+        if right_stripped != last_run.text:
+            last_run.text = right_stripped
             changed = True
-
     return changed
 
-# ---------------------------------------------------------
-# 11. HÀM TỰ ĐỘNG BỔ SUNG "VÀ CỘNG SỰ" VÀ HIGHLIGHT
-# ---------------------------------------------------------
-def fix_author_citations(p, in_references_section=False):
-    text = p.text
+
+AUTHOR_WORD = r"[A-ZÀ-Ỹ][A-Za-zÀ-ỹ'’.-]*"
+AUTHOR_NAME = rf"{AUTHOR_WORD}(?:\s+{AUTHOR_WORD}){{0,4}}"
+AUTHOR_SUFFIX = r"(?:\s+và\s+cộng\s+sự)?"
+YEAR_PATTERN = r"(?:19|20)\d{2}[a-z]?"
+
+
+def _looks_like_person_author(author_text):
+    normalized = unicodedata.normalize("NFD", author_text.upper())
+    normalized = "".join(
+        char for char in normalized if unicodedata.category(char) != "Mn"
+    )
+    words = re.findall(r"[A-Z]+", normalized)
+    if not words:
+        return False
+    normalized_text = " ".join(words)
+    if normalized_text in {"THEO", "WHO", "CDC", "UNICEF"}:
+        return False
+    institution_phrases = {
+        "BAO CAO",
+        "BO Y TE",
+        "SO Y TE",
+        "TRUONG DAI HOC",
+        "DAI HOC",
+        "BENH VIEN",
+        "TO CHUC",
+        "HIEP HOI",
+    }
+    if any(phrase in normalized_text for phrase in institution_phrases):
+        return False
+    return True
+
+
+def _merge_ranges(ranges):
+    if not ranges:
+        return []
+    merged = []
+    for start, end in sorted(ranges):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [tuple(item) for item in merged]
+
+
+def _find_author_citations_missing_year(text):
+    ranges = []
+    narrative_pattern = re.compile(
+        rf"\b(?i:Theo|Nghiên cứu của|Báo cáo của|Tác giả|"
+        rf"Công trình của)\s+(?P<author>{AUTHOR_NAME}{AUTHOR_SUFFIX})"
+    )
+    for match in narrative_pattern.finditer(text):
+        if not _looks_like_person_author(match.group("author")):
+            continue
+        start, end = match.span("author")
+        lookahead = text[end : end + 40]
+        if not re.search(YEAR_PATTERN, lookahead):
+            ranges.append((start, end))
+
+    parenthetical_pattern = re.compile(
+        rf"\((?P<author>{AUTHOR_NAME}{AUTHOR_SUFFIX})\)"
+    )
+    for match in parenthetical_pattern.finditer(text):
+        if _looks_like_person_author(match.group("author")):
+            ranges.append(match.span("author"))
+
+    reporting_pattern = re.compile(
+        rf"(?<!Theo )(?<!THEO )\b"
+        rf"(?P<author>{AUTHOR_NAME}{AUTHOR_SUFFIX})\s+"
+        rf"(?i:cho rằng|nhận thấy|ghi nhận|chỉ ra|báo cáo|"
+        rf"kết luận|đề xuất|mô tả|phát hiện)"
+    )
+    for match in reporting_pattern.finditer(text):
+        if not _looks_like_person_author(match.group("author")):
+            continue
+        start, end = match.span("author")
+        lookaround = text[max(0, start - 10) : min(len(text), end + 40)]
+        if not re.search(YEAR_PATTERN, lookaround):
+            ranges.append((start, end))
+
+    for match in re.finditer(r"và\s+cộng\s+sự", text, re.IGNORECASE):
+        start, end = match.span()
+        lookaround = text[max(0, start - 10) : min(len(text), end + 35)]
+        if not re.search(YEAR_PATTERN, lookaround):
+            ranges.append((start, end))
+    return _merge_ranges(ranges)
+
+
+def _remove_reference_abbreviations(text):
+    actions = []
+    working_text = text
+
+    working_text, author_count = re.subn(
+        r"(?i)(?:\s*,?\s*)"
+        r"(?:và\s+cộng\s+sự|và\s+cs\.?|et\s+al\.?)",
+        "",
+        working_text,
+    )
+    actions.extend(["reference_removed_et_al"] * author_count)
+
+    working_text, page_count = re.subn(
+        r"(?i)\btr\s*\.?\s*"
+        r"(?=\d{1,4}(?:\s*[-–—]\s*\d{1,4})?)",
+        "",
+        working_text,
+    )
+    actions.extend(["reference_removed_tr"] * page_count)
+
+    working_text = re.sub(r"\s+([,.;:])", r"\1", working_text)
+    working_text = re.sub(r",\s*,", ",", working_text)
+    working_text = re.sub(r" {2,}", " ", working_text)
+    return working_text, actions
+
+
+def fix_author_citations(paragraph, in_references_section=False):
+    text = paragraph.text
     if not text:
         return []
 
-    changed = []
     original_text = text
     working_text = text
+    actions = []
 
-    # 1. Bỏ phần doi:... trong toàn bộ văn bản (kể cả Tài liệu tham khảo)
-    if re.search(r"(?i)\bdoi:\s*\S+", working_text):
-        working_text = re.sub(r"(?i)\s*\bdoi:\s*\S+", "", working_text).strip()
-        changed.append("Đã xóa phần doi:")
+    working_text, doi_count = re.subn(
+        r"(?i)\s*\bdoi:\s*\S+",
+        "",
+        working_text,
+    )
+    actions.extend(["removed_doi"] * doi_count)
 
-    # 2. Xử lý "và cộng sự" (BỎ QUA phần TÀI LIỆU THAM KHẢO)
-    if not in_references_section:
-        if re.search(r"\bet\s+al\.?", working_text, re.IGNORECASE):
-            working_text = re.sub(r"\bet\s+al\.?", "và cộng sự", working_text, flags=re.IGNORECASE)
-            changed.append("Đã chuyển 'et al.' thành 'và cộng sự'")
+    if in_references_section:
+        working_text, reference_actions = _remove_reference_abbreviations(
+            working_text
+        )
+        actions.extend(reference_actions)
+        if working_text != original_text:
+            set_paragraph_text_preserve_formatting(
+                paragraph,
+                working_text,
+                highlight_changes=False,
+            )
+        return actions
 
-        pattern_narrative = r"\b([A-ZÀ-Ỹ][a-zà-ỹA-Za-zÀ-Ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹA-Za-zÀ-Ỹ]+){0,3})[\s\xa0]*\(((?:19|20)\d{2})\)"
-        pattern_parenthetical = r"\((?:bởi\s+)?([A-ZÀ-Ỹ][a-zà-ỹA-Za-zÀ-Ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zà-ỹA-Za-zÀ-Ỹ]+){0,3})[\s\xa0]*,[\s\xa0]*((?:19|20)\d{2})\)"
-        lead_words_pattern = r"^(Theo|Nghiên cứu của|Báo cáo của|Tác giả|Của|Trong)\s+"
+    working_text, et_al_count = re.subn(
+        r"(?i)\bet\s+al\.?|\bvà\s+cs\.?",
+        "và cộng sự",
+        working_text,
+    )
+    actions.extend(["body_normalized_et_al"] * et_al_count)
 
-        def repl_narrative(m):
-            raw_name = m.group(1).strip()
-            year = m.group(2)
-            lead_match = re.match(lead_words_pattern, raw_name, re.IGNORECASE)
-            lead_prefix = lead_match.group(0) if lead_match else ""
-            clean_name = raw_name[len(lead_prefix):].strip() if lead_match else raw_name
-            if not clean_name:
-                clean_name, lead_prefix = raw_name, ""
-            if re.search(r"(và\s+cộng\s+sự|và\s+cs\.?|et\s+al\.?)$", clean_name, re.IGNORECASE):
-                return m.group(0)
-            return f"{lead_prefix}{clean_name} và cộng sự ({year})"
+    narrative_with_year = re.compile(
+        rf"\b(?P<prefix>(?i:Theo|Nghiên cứu của|Báo cáo của|Tác giả|"
+        rf"Công trình của))\s+"
+        rf"(?P<author>{AUTHOR_NAME})\s*"
+        rf"\((?P<year>{YEAR_PATTERN})\)"
+    )
 
-        def repl_parenthetical(m):
-            raw_name = m.group(1).strip()
-            year = m.group(2)
-            if re.search(r"(và\s+cộng\s+sự|và\s+cs\.?|et\s+al\.?)$", raw_name, re.IGNORECASE):
-                return m.group(0)
-            return f"({raw_name} và cộng sự, {year})"
-
-        working_text = re.sub(pattern_narrative, repl_narrative, working_text)
-        working_text = re.sub(pattern_parenthetical, repl_parenthetical, working_text)
-
-    # 3. Quét kiểm tra "và cộng sự" bị thiếu năm
-    missing_year_ranges = []
-    if not in_references_section:
-        for match in re.finditer(r"và cộng sự", working_text, re.IGNORECASE):
-            start, end = match.span()
-            lookahead = working_text[end:end+25]  # Nhìn phía trước 25 ký tự để tìm năm
-            if not re.search(r"(?:19|20)\d{2}", lookahead):
-                missing_year_ranges.append((start, end))
-
-        if missing_year_ranges:
-            changed.append("Đã bôi vàng 'và cộng sự' thiếu năm")
-
-        if working_text != original_text and "và cộng sự" in working_text:
-            changed.append("Đã sửa / thêm 'và cộng sự'")
-
-    # Cập nhật lại văn bản nếu có sự thay đổi hoặc có vị trí thiếu năm
-    if working_text != original_text or missing_year_ranges:
-        set_paragraph_text_preserve_formatting(
-            p, 
-            working_text, 
-            highlight_changes=True, 
-            missing_year_ranges=missing_year_ranges
+    def replace_narrative(match):
+        author = match.group("author").strip()
+        if not _looks_like_person_author(author):
+            return match.group(0)
+        if re.search(r"và\s+cộng\s+sự$", author, re.IGNORECASE):
+            return match.group(0)
+        actions.append("body_added_et_al")
+        return (
+            f"{match.group('prefix')} {author} và cộng sự "
+            f"({match.group('year')})"
         )
 
-    return changed
+    working_text = narrative_with_year.sub(replace_narrative, working_text)
+
+    parenthetical_with_year = re.compile(
+        rf"\((?P<author>{AUTHOR_NAME})\s*,\s*"
+        rf"(?P<year>{YEAR_PATTERN})\)"
+    )
+
+    def replace_parenthetical(match):
+        author = match.group("author").strip()
+        if not _looks_like_person_author(author):
+            return match.group(0)
+        if re.search(r"và\s+cộng\s+sự$", author, re.IGNORECASE):
+            return match.group(0)
+        actions.append("body_added_et_al")
+        return f"({author} và cộng sự, {match.group('year')})"
+
+    working_text = parenthetical_with_year.sub(
+        replace_parenthetical,
+        working_text,
+    )
+
+    standalone_with_year = re.compile(
+        rf"\b(?P<author>{AUTHOR_NAME})"
+        rf"(?!\s+và\s+cộng\s+sự)\s*"
+        rf"\((?P<year>{YEAR_PATTERN})\)"
+    )
+
+    def replace_standalone(match):
+        if not _looks_like_person_author(match.group("author")):
+            return match.group(0)
+        actions.append("body_added_et_al")
+        return (
+            f"{match.group('author')} và cộng sự "
+            f"({match.group('year')})"
+        )
+
+    working_text = standalone_with_year.sub(
+        replace_standalone,
+        working_text,
+    )
+
+    missing_year_ranges = _find_author_citations_missing_year(working_text)
+    actions.extend(["author_missing_year"] * len(missing_year_ranges))
+    missing_year_red_ranges = [
+        (start, end, WD_COLOR_INDEX.RED)
+        for start, end in missing_year_ranges
+    ]
+
+    if working_text != original_text or missing_year_ranges:
+        set_paragraph_text_preserve_formatting(
+            paragraph,
+            working_text,
+            highlight_changes=working_text != original_text,
+            highlight_ranges=missing_year_red_ranges,
+        )
+    return actions
+
+
+def _normalize_heading(text):
+    normalized = unicodedata.normalize("NFD", text.upper())
+    normalized = "".join(
+        char for char in normalized if unicodedata.category(char) != "Mn"
+    )
+    normalized = re.sub(r"^\s*(?:CHUONG\s+)?(?:[IVXLCDM]+|\d+)[.:\s-]+", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" .:-\t")
+    return normalized
+
+
+def is_references_heading(text):
+    heading = _normalize_heading(text)
+    return heading in {
+        "TAI LIEU THAM KHAO",
+        "REFERENCES",
+        "BIBLIOGRAPHY",
+    }
+
+
+def is_heading_after_references(text):
+    heading = _normalize_heading(text)
+    return (
+        heading.startswith("PHU LUC")
+        or heading.startswith("APPENDIX")
+        or heading.startswith("DANH MUC BAI BAO")
+    )
+
 
 def has_image(paragraph):
+    """Chỉ nhận diện ảnh nhúng thật, không coi shape/đường kẻ là hình ảnh.
+
+    ``w:drawing`` và ``w:pict`` còn được Word dùng cho đường kẻ, khung,
+    AutoShape (ví dụ đường chéo trong ô bảng). Ảnh thật phải có phần tử chứa
+    dữ liệu ảnh: DrawingML ``a:blip``/``pic:pic`` hoặc VML ``v:imagedata``.
+    """
     xml = paragraph._element.xml
-    return "w:drawing" in xml or "w:pict" in xml or "a:blip" in xml
+    return (
+        "a:blip" in xml
+        or "pic:pic" in xml
+        or "v:imagedata" in xml
+    )
 
-# ---------------------------------------------------------
-# 12. ĐIỀU HÀNH CHUẨN HÓA TOÀN BỘ FILE DOCX
-# ---------------------------------------------------------
-def process_docx_file(uploaded_bytes, rules):
+
+def _all_document_paragraphs(doc):
+    """Lấy cả paragraph thường, paragraph trong bảng và trong text box."""
+    for element in doc.element.body.iter():
+        if isinstance(element, CT_P):
+            yield Paragraph(element, doc)
+
+
+def _paragraph_has_superscript_citation(paragraph):
+    for run in paragraph.runs:
+        if not bool(run.font.superscript):
+            continue
+        if re.fullmatch(r"\s*\d+(?:\s*[,;–—-]\s*\d+)*\s*", run.text):
+            return True
+    return False
+
+
+def _has_author_year_citation(text):
+    for match in re.finditer(r"\(([^)]*)\)", text):
+        content = match.group(1)
+        if (
+            re.search(r"(?:19|20)\d{2}[a-z]?", content)
+            and re.search(r"[A-Za-zÀ-ỹ]", content)
+        ):
+            return True
+    return False
+
+
+def _paragraph_has_explicit_image_source(paragraph):
+    text = paragraph.text.strip()
+    if not text:
+        return _paragraph_has_superscript_citation(paragraph)
+
+    explicit_source_patterns = [
+        r"(?i)\bnguồn\b",
+        r"(?i)\bsource\b",
+        r"(?i)\b(?:trích|tham khảo)\s+(?:từ|theo)\b",
+        r"(?i)\b(?:tác giả|nhóm nghiên cứu)\s+tự\s+"
+        r"(?:chụp|vẽ|xây dựng|tổng hợp|thiết kế)",
+        r"(?i)https?://|www\.",
+        r"(?i)\b[a-z0-9.-]+\.(?:vn|com|org|edu|gov)\b",
+        r"\[\s*\d+(?:\s*[,;–—-]\s*\d+)*\s*\]",
+    ]
+    if any(re.search(pattern, text) for pattern in explicit_source_patterns):
+        return True
+    if _has_author_year_citation(text):
+        return True
+    return _paragraph_has_superscript_citation(paragraph)
+
+
+def _paragraph_is_image_caption(paragraph):
+    return bool(
+        re.search(
+            r"(?i)^\s*(?:hình|sơ đồ|biểu đồ|đồ thị|bản đồ|ảnh|"
+            r"figure|fig\.?|chart)\s*(?:\d+|[:.-])",
+            paragraph.text,
+        )
+    )
+
+
+def _insert_image_warning(doc, image_paragraph, warning_text, font_target):
+    warning_paragraph = doc.add_paragraph()
+    image_paragraph._p.addnext(warning_paragraph._p)
+    warning_run = warning_paragraph.add_run(warning_text)
+    warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    warning_run.bold = True
+    if font_target:
+        warning_run.font.name = font_target
+    return warning_paragraph
+
+
+def check_image_citations(
+    doc,
+    cover_p_elements,
+    detailed_errors,
+    font_target,
+):
+    """
+    Quét hình trong thân bài, bảng và text box.
+
+    Chỉ coi là đã có nguồn khi vùng chú thích có "Nguồn/Source", URL,
+    trích dẫn số, trích dẫn tác giả-năm hoặc ghi rõ tác giả tự thực hiện.
+    Các từ chung chung như "theo", "tác giả", "WHO" không còn tự động
+    làm mất cảnh báo.
+    """
+    paragraphs = list(_all_document_paragraphs(doc))
+    missing_source_count = 0
+    missing_caption_count = 0
+
+    for index, paragraph in enumerate(paragraphs):
+        if not has_image(paragraph):
+            continue
+        if is_cover_or_logo_image(
+            index,
+            paragraph,
+            cover_p_elements,
+            paragraphs,
+        ):
+            continue
+
+        start_index = max(0, index - 1)
+        end_index = min(len(paragraphs), index + 4)
+        nearby_paragraphs = paragraphs[start_index:end_index]
+        source_paragraphs = paragraphs[index:end_index]
+        if (
+            index > 0
+            and _paragraph_is_image_caption(paragraphs[index - 1])
+        ):
+            source_paragraphs = [
+                paragraphs[index - 1],
+                *source_paragraphs,
+            ]
+
+        has_caption = any(
+            _paragraph_is_image_caption(item)
+            for item in nearby_paragraphs
+        )
+        has_source = any(
+            _paragraph_has_explicit_image_source(item)
+            for item in source_paragraphs
+        )
+
+        if has_caption and has_source:
+            continue
+
+        already_warned = any(
+            "CẢNH BÁO NGUỒN HÌNH" in item.text.upper()
+            for item in nearby_paragraphs
+        )
+        missing_items = []
+        if not has_source:
+            missing_source_count += 1
+            missing_items.append("chưa có trích dẫn nguồn")
+        if not has_caption:
+            missing_caption_count += 1
+            missing_items.append("chưa có tên/chú thích hình")
+
+        error_message = " và ".join(missing_items)
+        detailed_errors.append(
+            f"🖼️ **Hình ảnh {index + 1}:** {error_message}. "
+            "Đã đánh dấu để học viên bổ sung."
+        )
+
+        if not already_warned:
+            _insert_image_warning(
+                doc,
+                paragraph,
+                "⚠️ [CẢNH BÁO NGUỒN HÌNH]: "
+                f"Hình này {error_message}. Vui lòng bổ sung!",
+                font_target,
+            )
+
+    if missing_source_count:
+        detailed_errors.append(
+            "🟨 **Kiểm tra nguồn hình:** Phát hiện "
+            f"{missing_source_count} hình thiếu trích dẫn nguồn; "
+            "đã chèn cảnh báo bôi vàng ngay dưới hình."
+        )
+    if missing_caption_count:
+        detailed_errors.append(
+            "🟨 **Kiểm tra chú thích hình:** Phát hiện "
+            f"{missing_caption_count} hình thiếu tên/chú thích."
+        )
+    return {
+        "missing_source": missing_source_count,
+        "missing_caption": missing_caption_count,
+    }
+
+
+FALLBACK_STRUCTURE = [
+    "DAT VAN DE",
+    "TONG QUAN",
+    "DOI TUONG VA PHUONG PHAP NGHIEN CUU",
+    "KET QUA",
+    "BAN LUAN",
+    "KET LUAN",
+    "KIEN NGHI",
+    "TAI LIEU THAM KHAO",
+]
+
+STRUCTURE_LABELS = {
+    "DAT VAN DE": "Đặt vấn đề",
+    "TONG QUAN": "Tổng quan",
+    "DOI TUONG VA PHUONG PHAP NGHIEN CUU": (
+        "Đối tượng và phương pháp nghiên cứu"
+    ),
+    "KET QUA": "Kết quả",
+    "BAN LUAN": "Bàn luận",
+    "KET LUAN": "Kết luận",
+    "KIEN NGHI": "Kiến nghị",
+    "TAI LIEU THAM KHAO": "Tài liệu tham khảo",
+    "PHU LUC": "Phụ lục",
+}
+
+
+def _canonical_structure_key(text):
+    normalized = _normalize_heading(text)
+    if re.search(
+        r"\b(?:KET QUA\s+VA\s+BAN LUAN|"
+        r"BAN LUAN\s+VA\s+KET QUA)\b",
+        normalized,
+    ):
+        return "MERGED_RESULTS_DISCUSSION"
+    if (
+        "DOI TUONG" in normalized
+        and "PHUONG PHAP" in normalized
+        and "NGHIEN CUU" in normalized
+    ):
+        return "DOI TUONG VA PHUONG PHAP NGHIEN CUU"
+
+    exact_aliases = {
+        "DAT VAN DE": "DAT VAN DE",
+        "INTRODUCTION": "DAT VAN DE",
+        "TONG QUAN": "TONG QUAN",
+        "TONG QUAN TAI LIEU": "TONG QUAN",
+        "DOI TUONG VA PHUONG PHAP NGHIEN CUU": (
+            "DOI TUONG VA PHUONG PHAP NGHIEN CUU"
+        ),
+        "DOI TUONG PHUONG PHAP NGHIEN CUU": (
+            "DOI TUONG VA PHUONG PHAP NGHIEN CUU"
+        ),
+        "PHUONG PHAP NGHIEN CUU": (
+            "DOI TUONG VA PHUONG PHAP NGHIEN CUU"
+        ),
+        "KET QUA": "KET QUA",
+        "KET QUA NGHIEN CUU": "KET QUA",
+        "CAC KET QUA NGHIEN CUU": "KET QUA",
+        "BAN LUAN": "BAN LUAN",
+        "BAN LUAN KET QUA": "BAN LUAN",
+        "BAN LUAN KET QUA NGHIEN CUU": "BAN LUAN",
+        "DISCUSSION": "BAN LUAN",
+        "KET LUAN": "KET LUAN",
+        "KIEN NGHI": "KIEN NGHI",
+        "TAI LIEU THAM KHAO": "TAI LIEU THAM KHAO",
+        "REFERENCES": "TAI LIEU THAM KHAO",
+        "PHU LUC": "PHU LUC",
+        "APPENDIX": "PHU LUC",
+    }
+    return exact_aliases.get(normalized)
+
+
+def _extract_structure_headings(doc):
+    headings = []
+    for paragraph in list(_all_document_paragraphs(doc)):
+        key = _canonical_structure_key(paragraph.text)
+        if key:
+            headings.append((key, paragraph))
+    return headings
+
+
+def _template_structure(template_path):
+    if template_path and os.path.exists(template_path):
+        try:
+            template_doc = docx.Document(template_path)
+            keys = []
+            for key, _ in _extract_structure_headings(template_doc):
+                if (
+                    key != "MERGED_RESULTS_DISCUSSION"
+                    and key not in keys
+                ):
+                    keys.append(key)
+            if len(keys) >= 4:
+                return keys
+        except Exception:
+            pass
+    return list(FALLBACK_STRUCTURE)
+
+
+def _highlight_structure_paragraph(paragraph):
+    if paragraph.text:
+        highlight_paragraph_ranges(
+            paragraph,
+            [(0, len(paragraph.text))],
+            highlight_color=WD_COLOR_INDEX.YELLOW,
+            preserve_existing=True,
+        )
+
+
+def check_structure_against_template(
+    doc,
+    template_path,
+    detailed_errors,
+    font_target,
+):
+    expected_keys = _template_structure(template_path)
+    expected_positions = {
+        key: index for index, key in enumerate(expected_keys)
+    }
+    actual_headings = _extract_structure_headings(doc)
+    existing_warning_text = " ".join(
+        paragraph.text
+        for paragraph in _all_document_paragraphs(doc)
+        if "CẢNH BÁO CẤU TRÚC" in paragraph.text.upper()
+    )
+
+    merged_count = 0
+    out_of_order_count = 0
+    duplicate_count = 0
+    actual_keys = []
+    first_paragraph = actual_headings[0][1] if actual_headings else None
+
+    for key, paragraph in actual_headings:
+        if key == "MERGED_RESULTS_DISCUSSION":
+            merged_count += 1
+            _highlight_structure_paragraph(paragraph)
+            warning = (
+                "Phải tách riêng Chương Kết quả và Chương Bàn luận; "
+                "không gộp thành một chương."
+            )
+            if warning not in existing_warning_text:
+                _insert_image_warning(
+                    doc,
+                    paragraph,
+                    "⚠️ [CẢNH BÁO CẤU TRÚC]: " + warning,
+                    font_target,
+                )
+            continue
+        actual_keys.append(key)
+
+    seen_keys = set()
+    last_position = -1
+    for key, paragraph in actual_headings:
+        if key == "MERGED_RESULTS_DISCUSSION":
+            continue
+        if key in seen_keys:
+            duplicate_count += 1
+            _highlight_structure_paragraph(paragraph)
+            continue
+        seen_keys.add(key)
+
+        position = expected_positions.get(key)
+        if position is None:
+            continue
+        if position < last_position:
+            out_of_order_count += 1
+            _highlight_structure_paragraph(paragraph)
+            warning = (
+                f"Mục {STRUCTURE_LABELS.get(key, key)} đang sai "
+                "thứ tự so với file template."
+            )
+            if warning not in existing_warning_text:
+                _insert_image_warning(
+                    doc,
+                    paragraph,
+                    "⚠️ [CẢNH BÁO CẤU TRÚC]: " + warning,
+                    font_target,
+                )
+        else:
+            last_position = position
+
+    missing_keys = [
+        key for key in expected_keys
+        if key not in seen_keys
+    ]
+    if merged_count:
+        missing_keys = [
+            key for key in missing_keys
+            if key not in {"KET QUA", "BAN LUAN"}
+        ]
+
+    if missing_keys:
+        missing_labels = ", ".join(
+            STRUCTURE_LABELS.get(key, key) for key in missing_keys
+        )
+        warning = (
+            "Thiếu các chương/mục theo template: "
+            f"{missing_labels}."
+        )
+        if warning not in existing_warning_text:
+            if first_paragraph is not None:
+                _insert_image_warning(
+                    doc,
+                    first_paragraph,
+                    "⚠️ [CẢNH BÁO CẤU TRÚC]: " + warning,
+                    font_target,
+                )
+            else:
+                warning_paragraph = doc.add_paragraph()
+                warning_run = warning_paragraph.add_run(
+                    "⚠️ [CẢNH BÁO CẤU TRÚC]: " + warning
+                )
+                warning_run.bold = True
+                warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+                if font_target:
+                    warning_run.font.name = font_target
+
+    if merged_count:
+        detailed_errors.append(
+            "🟨 **Cấu trúc chương:** Phát hiện "
+            f"{merged_count} tiêu đề gộp Kết quả và Bàn luận; "
+            "đã bôi vàng và yêu cầu tách thành hai chương riêng."
+        )
+    if out_of_order_count:
+        detailed_errors.append(
+            "🟨 **Thứ tự theo template:** Phát hiện "
+            f"{out_of_order_count} chương/mục sai thứ tự; "
+            "đã bôi vàng."
+        )
+    if duplicate_count:
+        detailed_errors.append(
+            "🟨 **Cấu trúc chương:** Phát hiện "
+            f"{duplicate_count} chương/mục lớn bị lặp; đã bôi vàng."
+        )
+    if missing_keys:
+        detailed_errors.append(
+            "🟨 **Cấu trúc theo template:** Thiếu "
+            + ", ".join(
+                STRUCTURE_LABELS.get(key, key)
+                for key in missing_keys
+            )
+            + "; đã chèn cảnh báo bôi vàng."
+        )
+    return {
+        "merged": merged_count,
+        "out_of_order": out_of_order_count,
+        "duplicates": duplicate_count,
+        "missing": len(missing_keys),
+    }
+
+
+ABBREVIATION_PATTERN = re.compile(
+    r"(?<![0-9A-Za-zÀ-ỹĐđ])("
+    r"(?:GS\.?\s*TS\.?|PGS\.?\s*TS\.?|ThS\.?|"
+    r"BS(?:CKI{1,2}|NT)?\.?|"
+    r"HbA1c|SpO2|PaO2|FiO2|eGFR|mmHg|SARS-CoV-\d+|"
+    r"(?:[A-Za-zÀ-ỹĐđ]\.){2,}|"
+    r"[A-Za-zÀ-ỹĐđ]{2,12}"
+    r"(?:-[A-Za-zÀ-ỹĐđ0-9]{1,12})*)"
+    r")(?![0-9A-Za-zÀ-ỹĐđ])"
+)
+
+
+def _is_all_caps_heading(text):
+    stripped = text.strip()
+    if not stripped or stripped != stripped.upper():
+        return False
+    normalized = _normalize_heading(stripped)
+    one_line_headings = {
+        "KET LUAN",
+        "KIEN NGHI",
+        "TONG QUAN",
+        "PHU LUC",
+        "MUC LUC",
+        "DAT VAN DE",
+    }
+    if normalized in one_line_headings:
+        return True
+    if re.match(
+        r"(?i)^\s*(?:CHƯƠNG|CHAPTER|PHẦN|MỤC)\s+"
+        r"(?:\d+|[IVXLCDM]+)",
+        stripped,
+    ):
+        return True
+    words = re.findall(r"[A-Za-zÀ-ỹĐđ]+", stripped)
+    return 2 <= len(words) <= 25
+
+
+def _is_heading_like(paragraph):
+    text = paragraph.text.strip()
+    if not text:
+        return True
+    style_name = ""
+    try:
+        style_name = paragraph.style.name.lower()
+    except Exception:
+        pass
+    if style_name.startswith(("heading", "title", "subtitle")):
+        return True
+    if _is_all_caps_heading(text):
+        return True
+    if (
+        len(text.split()) <= 15
+        and not re.search(r"[.!?]\s*$", text)
+        and re.match(
+            r"^\s*(?:\d+(?:\.\d+)*|[IVXLCDM]+)[.)\s-]+",
+            text,
+        )
+    ):
+        return True
+    return False
+
+
+def _paragraph_is_in_table(paragraph):
+    parent = paragraph._p.getparent()
+    while parent is not None:
+        if str(parent.tag).endswith("}tc"):
+            return True
+        parent = parent.getparent()
+    return False
+
+
+def _find_abbreviation_ranges(text):
+    ranges = []
+    abbreviations = []
+    for match in ABBREVIATION_PATTERN.finditer(text):
+        abbreviation = match.group(1)
+        known_mixed_case = bool(
+            re.fullmatch(
+                r"(?:ThS\.?|HbA1c|SpO2|PaO2|FiO2|"
+                r"eGFR|mmHg|SARS-CoV-\d+)",
+                abbreviation,
+            )
+        )
+        if not known_mixed_case and not abbreviation.isupper():
+            continue
+        roman_candidate = re.sub(r"[^A-Z]", "", abbreviation.upper())
+        if roman_candidate and re.fullmatch(
+            r"[IVXLCDM]+",
+            roman_candidate,
+        ):
+            continue
+        ranges.append(match.span(1))
+        abbreviations.append(abbreviation)
+    return ranges, abbreviations
+
+
+def _sentence_spans(text):
+    spans = []
+    start = 0
+    for match in re.finditer(r"[.!?]+(?=\s+|$)", text):
+        end = match.end()
+        raw = text[start:end]
+        left_offset = len(raw) - len(raw.lstrip())
+        right_length = len(raw.rstrip())
+        if right_length > left_offset:
+            spans.append(
+                (start + left_offset, start + right_length)
+            )
+        start = end
+    if start < len(text):
+        raw = text[start:]
+        left_offset = len(raw) - len(raw.lstrip())
+        right_length = len(raw.rstrip())
+        if right_length > left_offset:
+            spans.append(
+                (start + left_offset, start + right_length)
+            )
+    return spans
+
+
+def _sentence_lacks_subject(sentence):
+    cleaned = re.sub(
+        r"^\s*(?:[-–—•*]+|\(?\d+(?:\.\d+)*[.)])\s*",
+        "",
+        sentence,
+    ).strip(" \t\"'“”")
+    if len(re.findall(r"[A-Za-zÀ-ỹĐđ]+", cleaned)) < 4:
+        return False
+
+    lowered = cleaned.lower()
+    if re.match(
+        r"^(?:hình|bảng|sơ đồ|biểu đồ|đồ thị|chương|mục)\b",
+        lowered,
+    ):
+        return False
+
+    strong_subjectless_start = re.compile(
+        r"^(?:cho thấy|nhận thấy|ghi nhận|chỉ ra|khẳng định|"
+        r"kết luận(?: rằng)?|đề xuất|tiến hành|thực hiện|"
+        r"sử dụng|áp dụng|đánh giá|phân tích|so sánh|"
+        r"khảo sát|thu thập|lựa chọn|xác định|mô tả|"
+        r"tính toán|kiểm định|phân loại|loại trừ|bao gồm|"
+        r"gồm|được tiến hành|được thực hiện|cần(?: phải)?|"
+        r"nên|phải)\b",
+        re.IGNORECASE,
+    )
+    if strong_subjectless_start.search(cleaned):
+        # Ví dụ "Phân tích hồi quy được sử dụng..." có "Phân tích
+        # hồi quy" làm chủ ngữ, không phải câu thiếu chủ ngữ.
+        if re.match(
+            r"^(?:phân tích|đánh giá|so sánh)\b.{0,80}\bđược\b",
+            lowered,
+        ):
+            return False
+        return True
+
+    contextual_error = re.match(
+        r"^(?:qua|thông qua|dựa trên|dựa vào|từ kết quả|"
+        r"từ phân tích)\b.{0,180}\b"
+        r"(?:cho thấy|nhận thấy|ghi nhận|chỉ ra|khẳng định)\b",
+        lowered,
+    )
+    if contextual_error:
+        if re.search(
+            r"\b(?:chúng tôi|tác giả|nhóm nghiên cứu)\b",
+            lowered,
+        ):
+            return False
+        if re.search(
+            r",\s*(?:nghiên cứu này|kết quả|số liệu|dữ liệu|"
+            r"đối tượng|bệnh nhân)\b",
+            lowered,
+        ):
+            return False
+        return True
+    return False
+
+
+def _find_subjectless_sentence_ranges(text):
+    ranges = []
+    for start, end in _sentence_spans(text):
+        if _sentence_lacks_subject(text[start:end]):
+            ranges.append((start, end))
+    return ranges
+
+
+def mark_abbreviations_and_subjectless_sentences(
+    doc,
+    cover_p_elements,
+    detailed_errors,
+):
+    abbreviation_counts = Counter()
+    subjectless_count = 0
+    in_references = False
+
+    for paragraph in list(_all_document_paragraphs(doc)):
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        if is_references_heading(text):
+            in_references = True
+            continue
+        if in_references and is_heading_after_references(text):
+            in_references = False
+        if in_references or paragraph._element in cover_p_elements:
+            continue
+        if (
+            "CẢNH BÁO NGUỒN HÌNH" in text.upper()
+            or "CẢNH BÁO CẤU TRÚC" in text.upper()
+        ):
+            continue
+
+        abbreviation_ranges = []
+        if not _is_all_caps_heading(text):
+            abbreviation_ranges, abbreviations = (
+                _find_abbreviation_ranges(paragraph.text)
+            )
+            abbreviation_counts.update(abbreviations)
+
+        subjectless_ranges = []
+        if (
+            not _is_heading_like(paragraph)
+            and not _paragraph_is_image_caption(paragraph)
+            and not _paragraph_is_in_table(paragraph)
+        ):
+            subjectless_ranges = _find_subjectless_sentence_ranges(
+                paragraph.text
+            )
+            subjectless_count += len(subjectless_ranges)
+
+        warning_ranges = abbreviation_ranges + subjectless_ranges
+        if warning_ranges:
+            highlight_paragraph_ranges(
+                paragraph,
+                warning_ranges,
+                highlight_color=WD_COLOR_INDEX.YELLOW,
+                preserve_existing=True,
+            )
+
+    if abbreviation_counts:
+        abbreviation_list = ", ".join(
+            sorted(abbreviation_counts, key=str.casefold)[:30]
+        )
+        detailed_errors.append(
+            "🔠 **Từ viết tắt:** Đã phát hiện và bôi vàng "
+            f"{sum(abbreviation_counts.values())} vị trí. "
+            f"Các từ gồm: {abbreviation_list}."
+        )
+    if subjectless_count:
+        detailed_errors.append(
+            "🟨 **Câu có dấu hiệu thiếu chủ ngữ:** Đã bôi vàng "
+            f"{subjectless_count} câu để học viên rà soát."
+        )
+    return {
+        "abbreviations": sum(abbreviation_counts.values()),
+        "subjectless_sentences": subjectless_count,
+    }
+
+
+def process_docx_file(uploaded_bytes, rules, template_path=None):
     doc = docx.Document(io.BytesIO(uploaded_bytes))
-
-    cover_errors, cover_p_elements = optimize_cover_pages(doc)
-    ethics_errors = fix_ethics_section(doc)
-
-    detailed_errors = cover_errors + ethics_errors
-
     font_target = rules["font_name"]
     size_target = float(rules["font_size"])
     line_target = float(rules["line_spacing"])
@@ -667,19 +1744,52 @@ def process_docx_file(uploaded_bytes, rules):
     target_top = float(rules["margin_top"])
     target_bottom = float(rules["margin_bottom"])
 
+    detailed_errors = []
+    check_structure_against_template(
+        doc,
+        template_path,
+        detailed_errors,
+        font_target,
+    )
+    cover_errors, cover_p_elements = optimize_cover_pages(doc)
+    ethics_errors = fix_ethics_section(doc)
+    detailed_errors.extend(cover_errors)
+    detailed_errors.extend(ethics_errors)
+
     for idx, section in enumerate(doc.sections):
-        curr_left = round(section.left_margin.cm, 1) if section.left_margin else 0
-        curr_right = round(section.right_margin.cm, 1) if section.right_margin else 0
-        curr_top = round(section.top_margin.cm, 1) if section.top_margin else 0
-        curr_bottom = round(section.bottom_margin.cm, 1) if section.bottom_margin else 0
-        if (
-            curr_left != target_left
-            or curr_right != target_right
-            or curr_top != target_top
-            or curr_bottom != target_bottom
-        ):
+        current_left = (
+            round(section.left_margin.cm, 1) if section.left_margin else 0
+        )
+        current_right = (
+            round(section.right_margin.cm, 1) if section.right_margin else 0
+        )
+        current_top = (
+            round(section.top_margin.cm, 1) if section.top_margin else 0
+        )
+        current_bottom = (
+            round(section.bottom_margin.cm, 1)
+            if section.bottom_margin
+            else 0
+        )
+        current_margins = (
+            current_left,
+            current_right,
+            current_top,
+            current_bottom,
+        )
+        target_margins = (
+            target_left,
+            target_right,
+            target_top,
+            target_bottom,
+        )
+        if current_margins != target_margins:
             detailed_errors.append(
-                f"📌 **Lề Trang (Phần {idx+1}):** Cũ ({curr_left}-{curr_right}-{curr_top}-{curr_bottom}cm) ➡️ **Đã sửa chuẩn quy định** ({target_left}-{target_right}-{target_top}-{target_bottom}cm)"
+                f"📌 **Lề trang (phần {idx + 1}):** Cũ "
+                f"{current_left}-{current_right}-{current_top}-"
+                f"{current_bottom} cm; đã sửa thành "
+                f"{target_left}-{target_right}-{target_top}-"
+                f"{target_bottom} cm."
             )
         section.left_margin = Cm(target_left)
         section.right_margin = Cm(target_right)
@@ -688,93 +1798,133 @@ def process_docx_file(uploaded_bytes, rules):
 
     spacing_count = 0
     title_bold_count = 0
-    fixed_authors = []
-    converted_citation_count = 0
+    citation_paragraph_count = 0
+    citation_moved_count = 0
+    action_counts = Counter()
     paragraphs = doc.paragraphs
+    in_references = False
 
-    for i, p in enumerate(paragraphs):
-        if clean_spaces_and_punctuation(p):
+    for index, paragraph in enumerate(paragraphs):
+        if clean_spaces_and_punctuation(paragraph):
             spacing_count += 1
-        if enforce_bold_for_thesis_title(p):
+        if enforce_bold_for_thesis_title(paragraph):
             title_bold_count += 1
-        authors = fix_author_citations(p)
-        if authors:
-            fixed_authors.extend(authors)
-        if convert_brackets_to_superscript(p, font_target, size_target):
-            converted_citation_count += 1
 
-        # KIỂM TRA HÌNH ẢNH (ĐÃ BỔ SUNG QUÉT PHẠM VI RỘNG & TỪ KHÓA NGOÙN DẠNG WEBSITE/LINK/TRÍCH DẪN)
-        if has_image(p):
-            if is_cover_or_logo_image(i, p, cover_p_elements, paragraphs):
-                continue
-
-            # Mở rộng quét 3 đoạn trước và 4 đoạn sau hình ảnh
-            start_idx = max(0, i - 3)
-            end_idx = min(len(paragraphs), i + 5)
-            nearby_text = " ".join([paragraphs[k].text.strip() for k in range(start_idx, end_idx) if paragraphs[k].text.strip()]).lower()
-
-            missing_text = []
-
-            # 1. Kiểm tra chú thích hình ảnh
-            caption_keywords = ["hình", "sơ đồ", "biểu đồ", "đồ thị", "bản đồ", "ảnh", "figure", "fig.", "chart"]
-            if not any(kw in nearby_text for kw in caption_keywords):
-                missing_text.append("Thiếu Tên/Chú thích hình")
-
-            # 2. Kiểm tra nguồn trích dẫn / URL / Website
-            source_keywords = [
-                "nguồn", "source", "website", "web", "link", "trích", "theo", "tác giả", 
-                "tự chụp", "tổng hợp", "bộ y tế", "who", "cdc", "bệnh viện", "bv", 
-                "http", "https", "www.", ".com", ".vn", ".org", ".edu", ".gov"
-            ]
-            has_numeric_citation = bool(re.search(r"\[\d+\]|\(\d+\)|(?:19|20)\d{2}", nearby_text))
-            has_source_keyword = any(kw in nearby_text for kw in source_keywords)
-
-            if not (has_source_keyword or has_numeric_citation):
-                missing_text.append("Thiếu Nguồn trích dẫn")
-
-            if missing_text:
-                err_msg = " & ".join(missing_text)
-                detailed_errors.append(f"🖼️ **Hình ảnh tại đoạn {i+1}:** {err_msg}")
-
-                warn_p = doc.add_paragraph()
-                p._p.addnext(warn_p._p)
-                r_warn = warn_p.add_run(f"⚠️ [CẢNH BÁO ĐỊNH DẠNG]: Bức ảnh này đang {err_msg}!")
-                r_warn.font.highlight_color = WD_COLOR_INDEX.YELLOW
-                r_warn.bold = True
-
-    if title_bold_count > 0:
-        detailed_errors.append("🖋️ **Tên Đề Tài:** Đã ép in đậm và **HIGHLIGHT màu vàng**.")
-    if spacing_count > 0:
-        detailed_errors.append(f"🧹 **Dấu Cách Thừa:** Đã dọn dẹp tại **{spacing_count} đoạn** văn.")
-    if fixed_authors:
-        detailed_errors.append(f"✍️ **Trích Dẫn Tác Giả:** Đã bổ sung 'và cộng sự' và **HIGHLIGHT màu vàng** tại **{len(fixed_authors)} vị trí**.")
-    if converted_citation_count > 0:
-        detailed_errors.append(f"✨ **Trích Dẫn Số:** Đã chuyển **{converted_citation_count} đoạn** ngoặc `[1]` thành lũy thừa `¹` và **HIGHLIGHT màu vàng**.")
-
-    # Áp dụng định dạng chuẩn cho Thân bài (Bỏ qua Trang Bìa và giữ nguyên lũy thừa)
-    for p in paragraphs:
-        if not p.text.strip():
+        if is_references_heading(paragraph.text):
+            in_references = True
             continue
-        if p._element not in cover_p_elements:
-            p.paragraph_format.line_spacing = line_target
-            p.paragraph_format.space_before = Pt(0)
-            p.paragraph_format.space_after = Pt(0)
-            for run in p.runs:
+        if in_references and is_heading_after_references(paragraph.text):
+            in_references = False
+
+        if paragraph._element not in cover_p_elements:
+            actions = fix_author_citations(
+                paragraph,
+                in_references_section=in_references,
+            )
+            action_counts.update(actions)
+
+            if not in_references:
+                citation_result = normalize_numeric_citations(
+                    paragraph,
+                    font_target,
+                    size_target,
+                )
+                if citation_result["changed"]:
+                    citation_paragraph_count += 1
+                citation_moved_count += citation_result[
+                    "moved_after_period"
+                ]
+
+    check_image_citations(
+        doc,
+        cover_p_elements,
+        detailed_errors,
+        font_target,
+    )
+    mark_abbreviations_and_subjectless_sentences(
+        doc,
+        cover_p_elements,
+        detailed_errors,
+    )
+
+    if title_bold_count:
+        detailed_errors.append(
+            "🖋️ **Tên đề tài:** Đã in đậm và bôi vàng."
+        )
+    if spacing_count:
+        detailed_errors.append(
+            f"🧹 **Dấu cách thừa:** Đã dọn tại "
+            f"{spacing_count} đoạn văn."
+        )
+    if action_counts["body_added_et_al"]:
+        detailed_errors.append(
+            "✍️ **Trích dẫn tác giả trong nội dung:** Đã bổ sung "
+            f"'và cộng sự' và bôi vàng phần thêm mới tại "
+            f"{action_counts['body_added_et_al']} vị trí."
+        )
+    if action_counts["body_normalized_et_al"]:
+        detailed_errors.append(
+            "✍️ **Trích dẫn tác giả trong nội dung:** Đã chuẩn hóa "
+            f"'et al./và cs.' tại "
+            f"{action_counts['body_normalized_et_al']} vị trí."
+        )
+    if action_counts["author_missing_year"]:
+        detailed_errors.append(
+            "🟥 **Trích dẫn chỉ có tên tác giả:** Cần bổ sung năm; "
+            f"đã bôi đỏ {action_counts['author_missing_year']} vị trí."
+        )
+    if action_counts["reference_removed_et_al"]:
+        detailed_errors.append(
+            "📚 **Tài liệu tham khảo:** Đã bỏ 'và cộng sự/et al.' "
+            f"tại {action_counts['reference_removed_et_al']} vị trí."
+        )
+    if action_counts["reference_removed_tr"]:
+        detailed_errors.append(
+            "📚 **Tài liệu tham khảo:** Đã bỏ chữ 'tr.' trước số trang "
+            f"tại {action_counts['reference_removed_tr']} vị trí."
+        )
+    if action_counts["removed_doi"]:
+        detailed_errors.append(
+            f"🔗 **DOI:** Đã xóa {action_counts['removed_doi']} vị trí."
+        )
+    if citation_paragraph_count:
+        detailed_errors.append(
+            "✨ **Trích dẫn số:** Đã chuyển ngoặc vuông thành số lũy "
+            f"thừa tại {citation_paragraph_count} đoạn."
+        )
+    if citation_moved_count:
+        detailed_errors.append(
+            "✨ **Vị trí trích dẫn số:** Đã đưa số lũy thừa ra sau "
+            f"dấu chấm và bôi vàng cả dấu chấm cùng số trích dẫn tại "
+            f"{citation_moved_count} vị trí."
+        )
+
+    for paragraph in paragraphs:
+        if not paragraph.text.strip():
+            continue
+        if paragraph._element not in cover_p_elements:
+            paragraph.paragraph_format.line_spacing = line_target
+            paragraph.paragraph_format.space_before = Pt(0)
+            paragraph.paragraph_format.space_after = Pt(0)
+            for run in paragraph.runs:
                 run.font.name = font_target
                 if not run.font.superscript:
                     run.font.size = Pt(size_target)
 
-    # Áp dụng định dạng cho Bảng (Bỏ qua Bảng Bìa)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
-                    if p._element in cover_p_elements:
+                for paragraph in cell.paragraphs:
+                    if paragraph._element in cover_p_elements:
                         continue
-                    clean_spaces_and_punctuation(p)
-                    convert_brackets_to_superscript(p, font_target, size_target)
-                    p.paragraph_format.line_spacing = line_target
-                    for run in p.runs:
+                    clean_spaces_and_punctuation(paragraph)
+                    normalize_numeric_citations(
+                        paragraph,
+                        font_target,
+                        size_target,
+                    )
+                    paragraph.paragraph_format.line_spacing = line_target
+                    for run in paragraph.runs:
                         run.font.name = font_target
                         if not run.font.superscript:
                             run.font.size = Pt(size_target)
@@ -784,128 +1934,251 @@ def process_docx_file(uploaded_bytes, rules):
     output.seek(0)
     return output, detailed_errors
 
-# ---------------------------------------------------------
-# 13. GIAO DIỆN CHÍNH STREAMLIT
-# ---------------------------------------------------------
-col_main, col_side = st.columns([2, 1])
 
-with col_main:
-    st.subheader("1. Chọn File Quy Định Trình Bày (.PDF)")
-    pdf_folder = "quy_dinh"
-    pdf_files = (
-        [f for f in os.listdir(pdf_folder) if f.endswith(".pdf")]
-        if os.path.exists(pdf_folder)
-        else []
-    )
-    selected_pdf = (
-        st.selectbox("Chọn file quy định PDF trong thư mục `quy_dinh`:", pdf_files)
-        if pdf_files
-        else None
+def main():
+    if st is None:
+        raise RuntimeError(
+            "Chưa cài Streamlit. Hãy chạy: pip install streamlit"
+        )
+
+    st.set_page_config(
+        page_title=(
+            "Đại học Y Hà Nội - Hệ thống Kiểm tra định dạng luận văn"
+        ),
+        page_icon="🎓",
+        layout="wide",
     )
 
-    pdf_text = ""
-    parsed_rules = {
-        "font_name": "Times New Roman",
-        "font_size": 13.0,
-        "line_spacing": 1.5,
-        "margin_top": 3.5,
-        "margin_bottom": 3.0,
-        "margin_left": 3.0,
-        "margin_right": 2.0,
-        "detailed_requirements": [],
+    col_logo, col_title = st.columns([1, 5])
+    with col_logo:
+        if os.path.exists("logo_hmu.png"):
+            st.image("logo_hmu.png", width=125)
+        else:
+            st.markdown(
+                "<h1 style='font-size:80px;margin:0;'>🎓</h1>",
+                unsafe_allow_html=True,
+            )
+    with col_title:
+        st.markdown(
+            """
+            <div style="line-height:1.2;margin-top:5px;">
+              <p style="font-size:16px;font-weight:600;color:#666;
+                        margin:0;text-transform:uppercase;">
+                Trường Đại học Y Hà Nội
+              </p>
+              <h1 style="font-size:28px;font-weight:700;color:#ad171c;
+                         margin:2px 0 8px 0;">
+                Trung tâm Khảo thí & ĐBCLGD — Bộ môn Mắt -
+                Khúc xạ nhãn khoa
+              </h1>
+              <h3 style="font-size:18px;font-weight:500;color:#333;
+                         margin:0;">
+                🔬 Hệ thống Kiểm tra và Sửa định dạng Luận văn tự động
+              </h3>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.caption(
+        "Hệ thống tự động kiểm tra quy định, bảo toàn trang bìa, "
+        "khung viền, logo và chuẩn hóa file Word theo quy chế."
+    )
+
+    try:
+        api_key = st.secrets.get(
+            "GEMINI_API_KEY",
+            os.environ.get("GEMINI_API_KEY", ""),
+        )
+    except Exception:
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+
+    col_main, col_side = st.columns([2, 1])
+    del col_side
+    with col_main:
+        st.subheader("1. Chọn File Quy Định Trình Bày (.PDF)")
+        pdf_folder = "quy_dinh"
+        pdf_files = (
+            [
+                name
+                for name in os.listdir(pdf_folder)
+                if name.lower().endswith(".pdf")
+            ]
+            if os.path.exists(pdf_folder)
+            else []
+        )
+        selected_pdf = (
+            st.selectbox(
+                "Chọn file quy định PDF trong thư mục quy_dinh:",
+                pdf_files,
+            )
+            if pdf_files
+            else None
+        )
+
+        parsed_rules = dict(DEFAULT_RULES)
+        parsed_rules["detailed_requirements"] = []
+        if selected_pdf:
+            pdf_path = os.path.join(pdf_folder, selected_pdf)
+            pdf_text = extract_raw_text_from_pdf(pdf_path)
+            if pdf_text:
+                parsed_rules = analyze_rules_with_gemini(
+                    pdf_text,
+                    api_key,
+                )
+                st.success(
+                    f"✅ Đã đọc thành công nội dung file {selected_pdf}!"
+                )
+                with st.expander(
+                    "📌 Báo cáo quy định đã trích xuất từ PDF"
+                ):
+                    st.markdown(
+                        f"**Font:** {parsed_rules.get('font_name')} | "
+                        f"**Cỡ:** {parsed_rules.get('font_size')} pt | "
+                        f"**Giãn dòng:** "
+                        f"{parsed_rules.get('line_spacing')}"
+                    )
+                    st.markdown(
+                        "**Lề trái-phải-trên-dưới:** "
+                        f"{parsed_rules.get('margin_left')} - "
+                        f"{parsed_rules.get('margin_right')} - "
+                        f"{parsed_rules.get('margin_top')} - "
+                        f"{parsed_rules.get('margin_bottom')} cm"
+                    )
+                    for requirement in parsed_rules.get(
+                        "detailed_requirements",
+                        [],
+                    ):
+                        st.markdown(f"* {requirement}")
+            else:
+                st.warning(
+                    "⚠️ PDF có thể là bản scan. Bạn hãy chỉnh thông số "
+                    "ở thanh bên phải."
+                )
+
+        st.subheader("2. Tải File Luận Văn Của Học Viên (.DOCX)")
+        uploaded_docx = st.file_uploader(
+            "Thả file .docx luận văn vào đây",
+            type=["docx"],
+        )
+
+    st.sidebar.title("📄 Tải Template Mẫu")
+    template_path = os.path.join("template", "template.docx")
+    if os.path.exists(template_path):
+        with open(template_path, "rb") as template_file:
+            template_bytes = template_file.read()
+        st.sidebar.download_button(
+            label="📥 TẢI TEMPLATE WORD MẪU (.DOCX)",
+            data=template_bytes,
+            file_name="template.docx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            use_container_width=True,
+        )
+        st.sidebar.caption(
+            "👉 Tải file mẫu về để điền nội dung đúng định dạng."
+        )
+    else:
+        st.sidebar.info(
+            "ℹ️ Không tìm thấy template.docx trong thư mục template."
+        )
+
+    st.sidebar.markdown("---")
+    st.sidebar.title("⚙️ Bảng Quy Định Định Dạng")
+    final_font = st.sidebar.text_input(
+        "Font chữ thân bài",
+        value=parsed_rules.get("font_name", "Times New Roman"),
+    )
+    final_size = st.sidebar.number_input(
+        "Cỡ chữ (pt)",
+        value=float(parsed_rules.get("font_size", 13.0)),
+        step=0.5,
+    )
+    final_spacing = st.sidebar.number_input(
+        "Giãn dòng",
+        value=float(parsed_rules.get("line_spacing", 1.5)),
+        step=0.1,
+    )
+    st.sidebar.subheader("📐 Căn Lề Trang (cm)")
+    final_left = st.sidebar.number_input(
+        "Lề trái",
+        value=float(parsed_rules.get("margin_left", 3.0)),
+        step=0.5,
+    )
+    final_right = st.sidebar.number_input(
+        "Lề phải",
+        value=float(parsed_rules.get("margin_right", 2.0)),
+        step=0.5,
+    )
+    final_top = st.sidebar.number_input(
+        "Lề trên",
+        value=float(parsed_rules.get("margin_top", 3.5)),
+        step=0.5,
+    )
+    final_bottom = st.sidebar.number_input(
+        "Lề dưới",
+        value=float(parsed_rules.get("margin_bottom", 3.0)),
+        step=0.5,
+    )
+    active_rules = {
+        "font_name": final_font,
+        "font_size": final_size,
+        "line_spacing": final_spacing,
+        "margin_left": final_left,
+        "margin_right": final_right,
+        "margin_top": final_top,
+        "margin_bottom": final_bottom,
     }
 
-    if selected_pdf:
-        pdf_path = os.path.join(pdf_folder, selected_pdf)
-        pdf_text = extract_raw_text_from_pdf(pdf_path)
-        if pdf_text:
-            parsed_rules = analyze_rules_with_gemini(pdf_text, API_KEY)
-            st.success(f"✅ Đã đọc thành công 100% nội dung file `{selected_pdf}`!")
-
-            with st.expander("📌 Báo cáo các quy định AI đã trích xuất từ file PDF"):
-                st.markdown(f"**Font chữ:** {parsed_rules.get('font_name')} | **Cỡ chữ:** {parsed_rules.get('font_size')}pt | **Giãn dòng:** {parsed_rules.get('line_spacing')}")
-                st.markdown(f"**Lề (Trái-Phải-Trên-Dưới):** {parsed_rules.get('margin_left')}cm - {parsed_rules.get('margin_right')}cm - {parsed_rules.get('margin_top')}cm - {parsed_rules.get('margin_bottom')}cm")
-                st.markdown("**Các yêu cầu chi tiết đọc được từ PDF:**")
-                reqs = parsed_rules.get("detailed_requirements", [])
-                if isinstance(reqs, list):
-                    for req in reqs:
-                        st.markdown(f"* {req}")
-                else:
-                    st.write(reqs)
-        else:
-            st.warning("⚠️ File PDF dạng Scan/Ảnh chụp. Bạn có thể tùy chỉnh thông số ở Sidebar bên phải!")
-
-    st.subheader("2. Tải File Luận Văn Của Học Viên (.DOCX)")
-    uploaded_docx = st.file_uploader("Thả file .docx luận văn vào đây", type=["docx"])
-
-# ---------------------------------------------------------
-# 14. THANH BÊN (SIDEBAR)
-# ---------------------------------------------------------
-st.sidebar.title("📄 Tải Template Mẫu")
-template_path = os.path.join("template", "template.docx")
-if os.path.exists(template_path):
-    with open(template_path, "rb") as f:
-        template_bytes = f.read()
-    st.sidebar.download_button(
-        label="📥 TẢI TEMPLATE WORD MẪU (.DOCX)",
-        data=template_bytes,
-        file_name="template.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        use_container_width=True,
-    )
-    st.sidebar.caption("👉 Tải file mẫu về để điền nội dung chuẩn định dạng.")
-else:
-    st.sidebar.info("ℹ️ Không tìm thấy file `template.docx` trong thư mục `template/`.")
-
-st.sidebar.markdown("---")
-st.sidebar.title("⚙️ Bảng Quy Định Định Dạng")
-
-final_font = st.sidebar.text_input("Font Chữ Thân Bài", value=parsed_rules.get("font_name", "Times New Roman"))
-final_size = st.sidebar.number_input("Cỡ Chữ (pt)", value=float(parsed_rules.get("font_size", 13.0)), step=0.5)
-final_spacing = st.sidebar.number_input("Giãn Dòng (Line Spacing)", value=float(parsed_rules.get("line_spacing", 1.5)), step=0.1)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📐 Căn Lề Trang (cm)")
-final_left = st.sidebar.number_input("Lề Trái (Left)", value=float(parsed_rules.get("margin_left", 3.0)), step=0.5)
-final_right = st.sidebar.number_input("Lề Phải (Right)", value=float(parsed_rules.get("margin_right", 2.0)), step=0.5)
-final_top = st.sidebar.number_input("Lề Trên (Top)", value=float(parsed_rules.get("margin_top", 3.5)), step=0.5)
-final_bottom = st.sidebar.number_input("Lề Dưới (Bottom)", value=float(parsed_rules.get("margin_bottom", 3.0)), step=0.5)
-
-active_rules = {
-    "font_name": final_font,
-    "font_size": final_size,
-    "line_spacing": final_spacing,
-    "margin_left": final_left,
-    "margin_right": final_right,
-    "margin_top": final_top,
-    "margin_bottom": final_bottom,
-}
-
-# ---------------------------------------------------------
-# 15. NÚT BẤM CHẠY CHƯƠNG TRÌNH
-# ---------------------------------------------------------
-with col_main:
-    st.markdown("---")
-    if st.button("🔍 KIỂM TRA ĐỊNH DẠNG", type="primary", use_container_width=True):
-        if not uploaded_docx:
-            st.error("❌ Vui lòng tải file Luận Văn (.docx) ở Bước 2 trước!")
-        else:
-            with st.spinner("⏳ Đang bảo toàn logo/bìa, sửa lỗi định dạng & HIGHLIGHT màu vàng..."):
-                fixed_stream, error_list = process_docx_file(
-                    uploaded_docx.getvalue(), active_rules
+    with col_main:
+        st.markdown("---")
+        if st.button(
+            "🔍 KIỂM TRA ĐỊNH DẠNG",
+            type="primary",
+            use_container_width=True,
+        ):
+            if not uploaded_docx:
+                st.error(
+                    "❌ Vui lòng tải file luận văn (.docx) ở bước 2."
                 )
-            st.markdown("### 📋 BẢNG BÁO CÁO KẾT QUẢ KIỂM TRA & SỬA LỖI")
-            if error_list:
-                for err in error_list:
-                    st.write(err)
-                st.success("🎉 **Đã hoàn thành! Toàn bộ vị trí sửa đổi đã được HIGHLIGHT màu vàng trong file Word.**")
             else:
-                st.success("🎉 File luận văn đã hoàn toàn đạt chuẩn định dạng!")
+                with st.spinner(
+                    "⏳ Đang bảo toàn bìa, sửa lỗi và đánh dấu màu..."
+                ):
+                    fixed_stream, error_list = process_docx_file(
+                        uploaded_docx.getvalue(),
+                        active_rules,
+                        template_path=template_path,
+                    )
+                st.markdown(
+                    "### 📋 BÁO CÁO KẾT QUẢ KIỂM TRA VÀ SỬA LỖI"
+                )
+                if error_list:
+                    for error in error_list:
+                        st.write(error)
+                    st.success(
+                        "🎉 Đã hoàn thành. Các vị trí cần lưu ý đã "
+                        "được bôi vàng hoặc đỏ trong file Word."
+                    )
+                else:
+                    st.success("🎉 File luận văn đã đạt chuẩn.")
+                st.download_button(
+                    label=(
+                        "📥 TẢI FILE LUẬN VĂN ĐÃ CHUẨN HÓA "
+                        "VÀ HIGHLIGHT"
+                    ),
+                    data=fixed_stream,
+                    file_name=(
+                        "LuanVan_DaiHocYHaNoi_DaChuanHoa.docx"
+                    ),
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "wordprocessingml.document"
+                    ),
+                    use_container_width=True,
+                )
 
-            st.download_button(
-                label="📥 TẢI FILE LUẬN VĂN ĐÃ ĐƯỢC CHUẨN HÓA & HIGHLIGHT",
-                data=fixed_stream,
-                file_name="LuanVan_DaiHocYHaNoi_DaChuanHoa.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
+
+if __name__ == "__main__":
+    main()
