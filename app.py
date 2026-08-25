@@ -2492,7 +2492,12 @@ def main():
 
     col_main, col_side = st.columns([2, 1])
     del col_side
-    template_path = os.path.join("template", "template.docx")
+    app_directory = os.path.dirname(os.path.abspath(__file__))
+    template_path = os.path.join(
+        app_directory,
+        "template",
+        "template.docx",
+    )
     with col_main:
         st.subheader("1. Chọn File Quy Định Trình Bày (.PDF)")
         pdf_folder = "quy_dinh"
@@ -2554,35 +2559,11 @@ def main():
                     "ở thanh bên phải."
                 )
 
-        st.subheader("2. Tải Template Chuẩn Của Trường (.DOCX)")
-        uploaded_template = st.file_uploader(
-            "Tải đúng file template dùng để đối chiếu thứ tự các phần",
-            type=["docx"],
-            key="uploaded_template",
+        st.subheader("2. Tải File Luận Văn Của Học Viên (.DOCX)")
+        st.caption(
+            "Cấu trúc luận văn được tự động đối chiếu với template "
+            "chuẩn đã tích hợp trong hệ thống."
         )
-        if uploaded_template is not None:
-            template_keys = _template_structure(
-                template_bytes=uploaded_template.getvalue()
-            )
-            st.success(
-                "✅ Đã nhận template và đọc thứ tự: "
-                + " → ".join(
-                    STRUCTURE_LABELS.get(key, key)
-                    for key in template_keys
-                )
-            )
-        elif os.path.exists(template_path):
-            st.info(
-                "ℹ️ Chưa tải template mới; hệ thống sẽ dùng file "
-                "template/template.docx đang có trên máy chủ."
-            )
-        else:
-            st.warning(
-                "⚠️ Chưa có template. Hãy tải template chuẩn trước "
-                "khi kiểm tra luận văn."
-            )
-
-        st.subheader("3. Tải File Luận Văn Của Học Viên (.DOCX)")
         uploaded_docx = st.file_uploader(
             "Thả file .docx luận văn vào đây",
             type=["docx"],
@@ -2592,10 +2573,10 @@ def main():
     st.sidebar.title("📄 Tải Template Mẫu")
     if os.path.exists(template_path):
         with open(template_path, "rb") as template_file:
-            template_bytes = template_file.read()
+            bundled_template_bytes = template_file.read()
         st.sidebar.download_button(
             label="📥 TẢI TEMPLATE WORD MẪU (.DOCX)",
-            data=template_bytes,
+            data=bundled_template_bytes,
             file_name="template.docx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
@@ -2667,22 +2648,14 @@ def main():
             type="primary",
             use_container_width=True,
         ):
-            template_bytes_for_check = (
-                uploaded_template.getvalue()
-                if uploaded_template is not None
-                else None
-            )
-            template_is_available = bool(template_bytes_for_check) or (
-                os.path.exists(template_path)
-            )
-            if not template_is_available:
+            if not os.path.exists(template_path):
                 st.error(
-                    "❌ Vui lòng tải template chuẩn (.docx) trước khi "
-                    "kiểm tra luận văn."
+                    "❌ Hệ thống chưa tìm thấy template chuẩn. "
+                    "Vui lòng liên hệ quản trị viên."
                 )
             elif not uploaded_docx:
                 st.error(
-                    "❌ Vui lòng tải file luận văn (.docx) ở bước 3."
+                    "❌ Vui lòng tải file luận văn (.docx) ở bước 2."
                 )
             else:
                 with st.spinner(
@@ -2692,7 +2665,6 @@ def main():
                         uploaded_docx.getvalue(),
                         active_rules,
                         template_path=template_path,
-                        template_bytes=template_bytes_for_check,
                     )
                 st.markdown(
                     "### 📋 BÁO CÁO KẾT QUẢ KIỂM TRA VÀ SỬA LỖI"
