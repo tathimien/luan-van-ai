@@ -1242,7 +1242,14 @@ def _normalize_heading(text):
     normalized = "".join(
         char for char in normalized if unicodedata.category(char) != "Mn"
     )
-    normalized = re.sub(r"^\s*(?:CHUONG\s+)?(?:[IVXLCDM]+|\d+)[.:\s-]+", "", normalized)
+    # Unicode NFD không tách chữ Đ thành D, phải thay riêng để các mục
+    # "ĐẶT VẤN ĐỀ" và "ĐỐI TƯỢNG..." được nhận diện đúng.
+    normalized = normalized.replace("Đ", "D")
+    normalized = re.sub(
+        r"^\s*(?:CHUONG\s+)?(?:[IVXLCDM]+|\d+)[.:\s-]+",
+        "",
+        normalized,
+    )
     normalized = re.sub(r"\s+", " ", normalized).strip(" .:-\t")
     return normalized
 
@@ -1350,6 +1357,50 @@ def _insert_image_warning(doc, image_paragraph, warning_text, font_target):
     return warning_paragraph
 
 
+COVER_END_STRUCTURE_KEYS = {
+    "LOI CAM ON",
+    "LOI CAM DOAN",
+    "MUC LUC",
+    "DANH MUC CHU VIET TAT",
+    "DANH MUC BANG",
+    "DANH MUC HINH SO DO BIEU DO",
+    "DAT VAN DE",
+}
+
+IMAGE_WARNING_PARAGRAPH_PATTERN = re.compile(
+    r"^\s*(?:⚠️\s*)?\[CẢNH BÁO NGUỒN HÌNH\]\s*:",
+    re.IGNORECASE,
+)
+
+
+def _remove_previous_image_warnings(doc):
+    """Xóa cảnh báo nguồn hình của lần quét trước để tránh cảnh báo rác."""
+    removed_count = 0
+    for paragraph in list(_all_document_paragraphs(doc)):
+        if not IMAGE_WARNING_PARAGRAPH_PATTERN.search(paragraph.text):
+            continue
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+            removed_count += 1
+    return removed_count
+
+
+def _find_cover_content_boundary(paragraphs):
+    """Trả về vị trí bắt đầu phần nội dung sau bìa chính và bìa phụ.
+
+    Word thường không lưu ngắt trang tự động trong XML, nên không thể chỉ
+    đếm ``w:br`` để xác định hai trang bìa. Các ảnh nằm trước tiêu đề đầu
+    tiên của phần đầu luận văn được coi là logo/thành phần trang bìa và
+    không phải ghi nguồn.
+    """
+    for index, paragraph in enumerate(paragraphs):
+        structure_key = _canonical_structure_key(paragraph.text)
+        if structure_key in COVER_END_STRUCTURE_KEYS:
+            return index
+    return None
+
+
 def check_image_citations(
     doc,
     cover_p_elements,
@@ -1364,12 +1415,21 @@ def check_image_citations(
     Các từ chung chung như "theo", "tác giả", "WHO" không còn tự động
     làm mất cảnh báo.
     """
+    removed_warning_count = _remove_previous_image_warnings(doc)
     paragraphs = list(_all_document_paragraphs(doc))
+    cover_content_boundary = _find_cover_content_boundary(paragraphs)
     missing_source_count = 0
     missing_caption_count = 0
+    skipped_cover_image_count = 0
 
     for index, paragraph in enumerate(paragraphs):
         if not has_image(paragraph):
+            continue
+        if (
+            cover_content_boundary is not None
+            and index < cover_content_boundary
+        ):
+            skipped_cover_image_count += 1
             continue
         if is_cover_or_logo_image(
             index,
@@ -1442,13 +1502,32 @@ def check_image_citations(
             "🟨 **Kiểm tra chú thích hình:** Phát hiện "
             f"{missing_caption_count} hình thiếu tên/chú thích."
         )
+    if skipped_cover_image_count:
+        detailed_errors.append(
+            "🏫 **Logo/trang bìa:** Đã bỏ qua "
+            f"{skipped_cover_image_count} ảnh trên bìa chính/bìa phụ; "
+            "không yêu cầu trích dẫn nguồn."
+        )
+    if removed_warning_count:
+        detailed_errors.append(
+            "🧹 **Làm sạch cảnh báo nguồn hình:** Đã xóa "
+            f"{removed_warning_count} cảnh báo cũ và kiểm tra lại từ đầu."
+        )
     return {
         "missing_source": missing_source_count,
         "missing_caption": missing_caption_count,
+        "skipped_cover_images": skipped_cover_image_count,
+        "removed_previous_warnings": removed_warning_count,
     }
 
 
 FALLBACK_STRUCTURE = [
+    "LOI CAM ON",
+    "LOI CAM DOAN",
+    "MUC LUC",
+    "DANH MUC CHU VIET TAT",
+    "DANH MUC BANG",
+    "DANH MUC HINH SO DO BIEU DO",
     "DAT VAN DE",
     "TONG QUAN",
     "DOI TUONG VA PHUONG PHAP NGHIEN CUU",
@@ -1460,6 +1539,14 @@ FALLBACK_STRUCTURE = [
 ]
 
 STRUCTURE_LABELS = {
+    "LOI CAM ON": "Lời cảm ơn",
+    "LOI CAM DOAN": "Lời cam đoan",
+    "MUC LUC": "Mục lục",
+    "DANH MUC CHU VIET TAT": "Danh mục chữ viết tắt",
+    "DANH MUC BANG": "Danh mục bảng",
+    "DANH MUC HINH SO DO BIEU DO": (
+        "Danh mục hình, sơ đồ, biểu đồ"
+    ),
     "DAT VAN DE": "Đặt vấn đề",
     "TONG QUAN": "Tổng quan",
     "DOI TUONG VA PHUONG PHAP NGHIEN CUU": (
@@ -1472,6 +1559,10 @@ STRUCTURE_LABELS = {
     "TAI LIEU THAM KHAO": "Tài liệu tham khảo",
     "PHU LUC": "Phụ lục",
 }
+
+# Template ghi rõ Kiến nghị không bắt buộc. Nếu có thì vẫn kiểm tra vị trí,
+# nhưng không báo thiếu khi luận văn không sử dụng phần này.
+OPTIONAL_STRUCTURE_KEYS = {"KIEN NGHI", "PHU LUC"}
 
 
 def _canonical_structure_key(text):
@@ -1490,6 +1581,21 @@ def _canonical_structure_key(text):
         return "DOI TUONG VA PHUONG PHAP NGHIEN CUU"
 
     exact_aliases = {
+        "LOI CAM ON": "LOI CAM ON",
+        "LOI CAM DOAN": "LOI CAM DOAN",
+        "MUC LUC": "MUC LUC",
+        "DANH MUC CAC CHU VIET TAT": "DANH MUC CHU VIET TAT",
+        "DANH MUC CHU VIET TAT": "DANH MUC CHU VIET TAT",
+        "DANH MUC BANG": "DANH MUC BANG",
+        "DANH MUC CAC BANG": "DANH MUC BANG",
+        "DANH MUC HINH": "DANH MUC HINH SO DO BIEU DO",
+        "DANH MUC HINH ANH": "DANH MUC HINH SO DO BIEU DO",
+        "DANH MUC HINH SO DO BIEU DO": (
+            "DANH MUC HINH SO DO BIEU DO"
+        ),
+        "DANH MUC HINH, SO DO, BIEU DO": (
+            "DANH MUC HINH SO DO BIEU DO"
+        ),
         "DAT VAN DE": "DAT VAN DE",
         "INTRODUCTION": "DAT VAN DE",
         "TONG QUAN": "TONG QUAN",
@@ -1523,16 +1629,59 @@ def _canonical_structure_key(text):
 def _extract_structure_headings(doc):
     headings = []
     for paragraph in list(_all_document_paragraphs(doc)):
+        try:
+            style_name = paragraph.style.name if paragraph.style else ""
+        except Exception:
+            style_name = ""
+        normalized_style = _normalize_heading(style_name)
+        # Không lấy các dòng trong Mục lục làm chương thật. Số trang của
+        # trường TOC đôi khi không xuất hiện trong paragraph.text, khiến
+        # "TÀI LIỆU THAM KHẢO" ở mục lục bị nhận nhầm là phần cuối luận văn.
+        if normalized_style.startswith(
+            ("TOC", "MUC LUC", "CONTENTS", "TABLE OF CONTENTS")
+        ):
+            continue
         key = _canonical_structure_key(paragraph.text)
         if key:
             headings.append((key, paragraph))
     return headings
 
 
-def _template_structure(template_path):
-    if template_path and os.path.exists(template_path):
-        try:
+STRUCTURE_WARNING_PARAGRAPH_PATTERN = re.compile(
+    r"^\s*(?:⚠️\s*)?\[CẢNH BÁO CẤU TRÚC\]\s*:",
+    re.IGNORECASE,
+)
+
+
+def _remove_previous_structure_warnings(doc):
+    """Xóa cảnh báo cấu trúc do lần chạy trước tạo ra trước khi kiểm tra lại."""
+    removed_count = 0
+    for paragraph in list(_all_document_paragraphs(doc)):
+        if not STRUCTURE_WARNING_PARAGRAPH_PATTERN.search(paragraph.text):
+            continue
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+            removed_count += 1
+    return removed_count
+
+
+def _clear_old_structure_highlight(paragraph):
+    for run in paragraph.runs:
+        if run.font.highlight_color == WD_COLOR_INDEX.YELLOW:
+            run.font.highlight_color = None
+
+
+def _template_structure(template_path=None, template_bytes=None):
+    try:
+        if template_bytes:
+            template_doc = docx.Document(io.BytesIO(template_bytes))
+        elif template_path and os.path.exists(template_path):
             template_doc = docx.Document(template_path)
+        else:
+            template_doc = None
+
+        if template_doc is not None:
             keys = []
             for key, _ in _extract_structure_headings(template_doc):
                 if (
@@ -1542,8 +1691,8 @@ def _template_structure(template_path):
                     keys.append(key)
             if len(keys) >= 4:
                 return keys
-        except Exception:
-            pass
+    except Exception:
+        pass
     return list(FALLBACK_STRUCTURE)
 
 
@@ -1562,12 +1711,27 @@ def check_structure_against_template(
     template_path,
     detailed_errors,
     font_target,
+    template_bytes=None,
 ):
-    expected_keys = _template_structure(template_path)
+    removed_warning_count = _remove_previous_structure_warnings(doc)
+    expected_keys = _template_structure(
+        template_path=template_path,
+        template_bytes=template_bytes,
+    )
     expected_positions = {
         key: index for index, key in enumerate(expected_keys)
     }
     actual_headings = _extract_structure_headings(doc)
+    if removed_warning_count:
+        # Các tiêu đề từng bị báo sai đã được bôi vàng ở lần chạy trước.
+        # Xóa màu cũ trước, sau đó chỉ bôi lại nếu lần kiểm tra mới vẫn sai.
+        for _, paragraph in actual_headings:
+            _clear_old_structure_highlight(paragraph)
+        detailed_errors.append(
+            "🧹 **Cảnh báo cấu trúc cũ:** Đã xóa "
+            f"{removed_warning_count} cảnh báo của lần kiểm tra trước "
+            "và đánh giá lại từ đầu."
+        )
     existing_warning_text = " ".join(
         paragraph.text
         for paragraph in _all_document_paragraphs(doc)
@@ -1631,7 +1795,7 @@ def check_structure_against_template(
 
     missing_keys = [
         key for key in expected_keys
-        if key not in seen_keys
+        if key not in seen_keys and key not in OPTIONAL_STRUCTURE_KEYS
     ]
     if merged_count:
         missing_keys = [
@@ -1989,7 +2153,12 @@ def detect_legacy_vietnamese_fonts(doc, cover_p_elements, detailed_errors):
     return legacy_runs
 
 
-def process_docx_file(uploaded_bytes, rules, template_path=None):
+def process_docx_file(
+    uploaded_bytes,
+    rules,
+    template_path=None,
+    template_bytes=None,
+):
     doc = docx.Document(io.BytesIO(uploaded_bytes))
     font_target = rules["font_name"]
     size_target = float(rules["font_size"])
@@ -2011,6 +2180,7 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
         template_path,
         detailed_errors,
         font_target,
+        template_bytes=template_bytes,
     )
     cover_errors, cover_p_elements = optimize_cover_pages(doc)
     ethics_errors = fix_ethics_section(doc)
@@ -2322,6 +2492,7 @@ def main():
 
     col_main, col_side = st.columns([2, 1])
     del col_side
+    template_path = os.path.join("template", "template.docx")
     with col_main:
         st.subheader("1. Chọn File Quy Định Trình Bày (.PDF)")
         pdf_folder = "quy_dinh"
@@ -2383,14 +2554,42 @@ def main():
                     "ở thanh bên phải."
                 )
 
-        st.subheader("2. Tải File Luận Văn Của Học Viên (.DOCX)")
+        st.subheader("2. Tải Template Chuẩn Của Trường (.DOCX)")
+        uploaded_template = st.file_uploader(
+            "Tải đúng file template dùng để đối chiếu thứ tự các phần",
+            type=["docx"],
+            key="uploaded_template",
+        )
+        if uploaded_template is not None:
+            template_keys = _template_structure(
+                template_bytes=uploaded_template.getvalue()
+            )
+            st.success(
+                "✅ Đã nhận template và đọc thứ tự: "
+                + " → ".join(
+                    STRUCTURE_LABELS.get(key, key)
+                    for key in template_keys
+                )
+            )
+        elif os.path.exists(template_path):
+            st.info(
+                "ℹ️ Chưa tải template mới; hệ thống sẽ dùng file "
+                "template/template.docx đang có trên máy chủ."
+            )
+        else:
+            st.warning(
+                "⚠️ Chưa có template. Hãy tải template chuẩn trước "
+                "khi kiểm tra luận văn."
+            )
+
+        st.subheader("3. Tải File Luận Văn Của Học Viên (.DOCX)")
         uploaded_docx = st.file_uploader(
             "Thả file .docx luận văn vào đây",
             type=["docx"],
+            key="uploaded_thesis",
         )
 
     st.sidebar.title("📄 Tải Template Mẫu")
-    template_path = os.path.join("template", "template.docx")
     if os.path.exists(template_path):
         with open(template_path, "rb") as template_file:
             template_bytes = template_file.read()
@@ -2468,9 +2667,22 @@ def main():
             type="primary",
             use_container_width=True,
         ):
-            if not uploaded_docx:
+            template_bytes_for_check = (
+                uploaded_template.getvalue()
+                if uploaded_template is not None
+                else None
+            )
+            template_is_available = bool(template_bytes_for_check) or (
+                os.path.exists(template_path)
+            )
+            if not template_is_available:
                 st.error(
-                    "❌ Vui lòng tải file luận văn (.docx) ở bước 2."
+                    "❌ Vui lòng tải template chuẩn (.docx) trước khi "
+                    "kiểm tra luận văn."
+                )
+            elif not uploaded_docx:
+                st.error(
+                    "❌ Vui lòng tải file luận văn (.docx) ở bước 3."
                 )
             else:
                 with st.spinner(
@@ -2480,6 +2692,7 @@ def main():
                         uploaded_docx.getvalue(),
                         active_rules,
                         template_path=template_path,
+                        template_bytes=template_bytes_for_check,
                     )
                 st.markdown(
                     "### 📋 BÁO CÁO KẾT QUẢ KIỂM TRA VÀ SỬA LỖI"
