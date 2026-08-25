@@ -32,13 +32,20 @@ except ImportError:
 DEFAULT_RULES = {
     "font_name": "Times New Roman",
     "font_size": 13.0,
+    # Luận văn được phép dùng thống nhất cỡ 13 hoặc cỡ 14.
+    "allowed_font_sizes": [13.0, 14.0],
     "line_spacing": 1.5,
     "margin_top": 3.5,
     "margin_bottom": 3.0,
-    "margin_left": 3.0,
+    "margin_left": 3.5,
     "margin_right": 2.0,
     "detailed_requirements": [
-        "Sử dụng thông số mặc định của Bộ môn do chưa phân tích được qua AI."
+        "Bảng mã Unicode; Times New Roman cỡ 13 hoặc 14; giãn dòng 1,5.",
+        "Lề trên 3,5 cm; dưới 3,0 cm; trái 3,5 cm; phải 2,0 cm.",
+        "Tài liệu tham khảo: tên Việt Nam viết đầy đủ; tên nước ngoài "
+        "ghi họ đầy đủ, tên đệm/tên gọi viết tắt; trên 3 tác giả ghi 3 "
+        "tác giả đầu và cộng sự/et al.; năm trong ngoặc; tên bài in "
+        "đứng; tên tạp chí in nghiêng; tập/số in đậm; trang chỉ ghi số.",
     ],
 }
 
@@ -80,10 +87,11 @@ Markdown:
 {{
   "font_name": "Times New Roman",
   "font_size": 13.0,
+  "allowed_font_sizes": [13.0, 14.0],
   "line_spacing": 1.5,
   "margin_top": 3.5,
   "margin_bottom": 3.0,
-  "margin_left": 3.0,
+  "margin_left": 3.5,
   "margin_right": 2.0,
   "detailed_requirements": ["Các quy định cụ thể tìm thấy trong PDF"]
 }}
@@ -874,30 +882,232 @@ def _find_author_citations_missing_year(text):
     return _merge_ranges(ranges)
 
 
-def _remove_reference_abbreviations(text):
+REFERENCE_NUMBER_PATTERN = re.compile(r"^\s*(?P<number>\d+[.)]?)\s*")
+REFERENCE_YEAR_PATTERN = re.compile(
+    rf"(?P<open>\()?\b(?P<year>{YEAR_PATTERN})\b(?P<close>\))?"
+)
+REFERENCE_SUFFIX_PATTERN = re.compile(
+    r"(?i)(?:\s*,?\s*)(?:và\s+cộng\s+sự|và\s+cs\.?|et\s+al\.?)\s*$"
+)
+VIETNAMESE_SURNAMES = {
+    "BÙI", "CAO", "ĐẶNG", "ĐINH", "ĐỖ", "DƯƠNG", "HOÀNG", "HUỲNH",
+    "LÊ", "LÝ", "NGÔ", "NGUYỄN", "PHẠM", "PHAN", "TRẦN", "TRỊNH",
+    "VÕ", "VŨ",
+}
+
+
+def _is_vietnamese_author_block(author_text):
+    if re.search(r"[À-ỹĐđ]", author_text):
+        return True
+    first_words = {
+        item.strip().split()[0].upper()
+        for item in re.split(r"\s*,\s*|\s+và\s+", author_text)
+        if item.strip()
+    }
+    return bool(first_words & VIETNAMESE_SURNAMES)
+
+
+def _split_reference_authors(author_text):
+    without_suffix = REFERENCE_SUFFIX_PATTERN.sub("", author_text).strip()
+    authors = [
+        item.strip(" ,;")
+        for item in re.split(r"\s*,\s*|\s+và\s+", without_suffix)
+        if item.strip(" ,;")
+    ]
+    return authors
+
+
+def _normalize_reference_authors(author_text):
+    """Chuẩn hóa khối tác giả theo quy định 3 tác giả đầu + cộng sự."""
     actions = []
-    working_text = text
+    had_suffix = bool(REFERENCE_SUFFIX_PATTERN.search(author_text))
+    is_vietnamese = _is_vietnamese_author_block(author_text)
+    authors = _split_reference_authors(author_text)
 
-    working_text, author_count = re.subn(
-        r"(?i)(?:\s*,?\s*)"
-        r"(?:và\s+cộng\s+sự|và\s+cs\.?|et\s+al\.?)",
-        "",
-        working_text,
+    # Không tự sửa tên cơ quan/tổ chức vì dấu phẩy có thể không phân cách tác giả.
+    if not authors or not all(_looks_like_person_author(item) for item in authors):
+        return author_text.strip(" ,.;"), actions, is_vietnamese
+
+    needs_suffix = len(authors) > 3 or had_suffix
+    if len(authors) > 3:
+        authors = authors[:3]
+        actions.append("reference_trimmed_authors")
+
+    if needs_suffix:
+        if is_vietnamese:
+            normalized = ", ".join(authors) + " và cộng sự"
+        else:
+            normalized = ", ".join(authors) + ", et al."
+        if not had_suffix:
+            actions.append("reference_added_et_al")
+    else:
+        normalized = ", ".join(authors)
+
+    author_warning = False
+    if is_vietnamese:
+        # Tên Việt Nam phải ghi đầy đủ; các chữ cái đơn/viết tắt là dấu hiệu sai.
+        author_warning = any(
+            len(re.findall(r"[A-Za-zÀ-ỹĐđ]+", item)) < 2
+            or bool(re.search(r"(?<!\w)[A-ZĐ]\.(?:[A-ZĐ]\.)?", item))
+            for item in authors
+        )
+    else:
+        # Tên nước ngoài: họ đầy đủ, tên gọi và tên đệm dùng chữ cái viết tắt.
+        author_warning = any(
+            len(item.split()) >= 2
+            and not any(
+                re.fullmatch(r"[A-Z](?:\.)?", token)
+                or re.fullmatch(r"(?:[A-Z]\.?){1,4}", token)
+                for token in item.replace(",", " ").split()[1:]
+            )
+            for item in authors
+        )
+    if author_warning:
+        actions.append("reference_author_name_warning")
+
+    return normalized, actions, is_vietnamese
+
+
+def _set_reference_character_style(paragraph, ranges):
+    """Áp dụng in đứng/in nghiêng/in đậm theo các khoảng ký tự."""
+    records = _paragraph_char_records(paragraph)
+    if not records:
+        return False
+    changed = False
+    for start, end, bold, italic in ranges:
+        for index in range(max(0, start), min(end, len(records))):
+            char, style = records[index]
+            values = list(style)
+            if values[0] != bold or values[1] != italic:
+                values[0] = bold
+                values[1] = italic
+                records[index] = (char, tuple(values))
+                changed = True
+    if changed:
+        _rebuild_paragraph(paragraph, records)
+    return changed
+
+
+def _format_reference_title_journal_volume(paragraph):
+    """Tên bài in đứng, tên tạp chí in nghiêng, tập/số in đậm."""
+    text = paragraph.text
+    year_match = REFERENCE_YEAR_PATTERN.search(text)
+    page_match = re.search(
+        r"(?P<pages>\d{1,5}(?:\s*[-–—]\s*\d{1,5})?)\s*\.?\s*$",
+        text,
     )
-    actions.extend(["reference_removed_et_al"] * author_count)
+    if not year_match or not page_match:
+        return False
 
-    working_text, page_count = re.subn(
-        r"(?i)\btr\s*\.?\s*"
-        r"(?=\d{1,4}(?:\s*[-–—]\s*\d{1,4})?)",
-        "",
-        working_text,
+    volume_match = re.search(
+        r"(?P<volume>\d+(?:\s*\([^)]*\))?)\s*,\s*"
+        r"(?P<pages>\d{1,5}(?:\s*[-–—]\s*\d{1,5})?)\s*\.?\s*$",
+        text[year_match.end() :],
     )
-    actions.extend(["reference_removed_tr"] * page_count)
+    if not volume_match:
+        return False
+    volume_start = year_match.end() + volume_match.start("volume")
+    volume_end = year_match.end() + volume_match.end("volume")
 
-    working_text = re.sub(r"\s+([,.;:])", r"\1", working_text)
-    working_text = re.sub(r",\s*,", ",", working_text)
-    working_text = re.sub(r" {2,}", " ", working_text)
-    return working_text, actions
+    content_start = year_match.end()
+    while content_start < len(text) and text[content_start] in " .,:;\t":
+        content_start += 1
+    title_separator = re.search(r"\.\s+", text[content_start:volume_start])
+    if not title_separator:
+        return False
+    title_end = content_start + title_separator.start()
+    journal_start = content_start + title_separator.end()
+    journal_end = volume_start
+    while journal_end > journal_start and text[journal_end - 1] in " ,.;\t":
+        journal_end -= 1
+
+    return _set_reference_character_style(
+        paragraph,
+        [
+            (content_start, title_end, False, False),
+            (journal_start, journal_end, False, True),
+            (volume_start, volume_end, True, False),
+        ],
+    )
+
+
+def normalize_reference_entry(paragraph):
+    """Chuẩn hóa một mục tài liệu tham khảo và trả về danh sách thao tác."""
+    original_text = paragraph.text
+    number_match = REFERENCE_NUMBER_PATTERN.match(original_text)
+    if not number_match or not original_text[number_match.end() :].strip():
+        return []
+
+    actions = []
+    year_match = REFERENCE_YEAR_PATTERN.search(original_text, number_match.end())
+    if not year_match:
+        highlight_paragraph_ranges(
+            paragraph,
+            [(number_match.end(), len(original_text))],
+            highlight_color=WD_COLOR_INDEX.RED,
+            preserve_existing=False,
+        )
+        return ["reference_missing_year"]
+
+    number_text = number_match.group("number").rstrip(".)") + "."
+    author_text = original_text[number_match.end() : year_match.start()].strip(
+        " ,.;\t"
+    )
+    normalized_authors, author_actions, _ = _normalize_reference_authors(
+        author_text
+    )
+    actions.extend(author_actions)
+
+    year = year_match.group("year")
+    if not (year_match.group("open") and year_match.group("close")):
+        actions.append("reference_parenthesized_year")
+
+    remainder = original_text[year_match.end() :].lstrip(" .,:;\t")
+    remainder, page_prefix_count = re.subn(
+        r"(?i)\btr\s*\.?\s*(?=\d{1,5}(?:\s*[-–—]\s*\d{1,5})?)",
+        "",
+        remainder,
+    )
+    actions.extend(["reference_removed_tr"] * page_prefix_count)
+    remainder = re.sub(r"\s*[-–—]\s*", "-", remainder)
+    remainder = re.sub(r"\s+([,.;:])", r"\1", remainder)
+    remainder = re.sub(r",\s*,", ",", remainder)
+    remainder = re.sub(r" {2,}", " ", remainder).strip()
+
+    normalized_text = (
+        f"{number_text} {normalized_authors}. ({year}). {remainder}"
+    ).strip()
+    normalized_text = re.sub(r"\.\s*\.\s*\(", ". (", normalized_text)
+    normalized_text = re.sub(r" {2,}", " ", normalized_text)
+    if normalized_text != original_text:
+        set_paragraph_text_preserve_formatting(
+            paragraph,
+            normalized_text,
+            highlight_changes=True,
+        )
+
+    if "reference_author_name_warning" in actions:
+        current_year = REFERENCE_YEAR_PATTERN.search(paragraph.text)
+        if current_year:
+            current_number = REFERENCE_NUMBER_PATTERN.match(paragraph.text)
+            highlight_paragraph_ranges(
+                paragraph,
+                [(current_number.end(), current_year.start())],
+                highlight_color=WD_COLOR_INDEX.YELLOW,
+                preserve_existing=True,
+            )
+
+    if _format_reference_title_journal_volume(paragraph):
+        actions.append("reference_styled")
+    else:
+        actions.append("reference_structure_warning")
+        highlight_paragraph_ranges(
+            paragraph,
+            [(0, len(paragraph.text))],
+            highlight_color=WD_COLOR_INDEX.YELLOW,
+            preserve_existing=True,
+        )
+    return actions
 
 
 def fix_author_citations(paragraph, in_references_section=False):
@@ -917,16 +1127,13 @@ def fix_author_citations(paragraph, in_references_section=False):
     actions.extend(["removed_doi"] * doi_count)
 
     if in_references_section:
-        working_text, reference_actions = _remove_reference_abbreviations(
-            working_text
-        )
-        actions.extend(reference_actions)
         if working_text != original_text:
             set_paragraph_text_preserve_formatting(
                 paragraph,
                 working_text,
                 highlight_changes=False,
             )
+        actions.extend(normalize_reference_entry(paragraph))
         return actions
 
     working_text, et_al_count = re.subn(
@@ -1734,10 +1941,47 @@ def mark_abbreviations_and_subjectless_sentences(
     }
 
 
+LEGACY_VIETNAMESE_FONT_PATTERN = re.compile(
+    r"(?i)(?:^\.?vn|vni[-_ ]?|tcvn|abc[-_ ]?font)"
+)
+
+
+def detect_legacy_vietnamese_fonts(doc, cover_p_elements, detailed_errors):
+    """Phát hiện font TCVN3/VNI cũ; bôi đỏ thay vì đổi font gây sai dấu."""
+    legacy_runs = set()
+    legacy_fonts = Counter()
+    for paragraph in _all_document_paragraphs(doc):
+        if paragraph._element in cover_p_elements:
+            continue
+        for run in paragraph.runs:
+            font_name = (run.font.name or "").strip()
+            if not font_name or not LEGACY_VIETNAMESE_FONT_PATTERN.search(font_name):
+                continue
+            run.font.highlight_color = WD_COLOR_INDEX.RED
+            legacy_runs.add(run._element)
+            legacy_fonts[font_name] += 1
+
+    if legacy_runs:
+        font_list = ", ".join(sorted(legacy_fonts, key=str.casefold))
+        detailed_errors.append(
+            "🟥 **Bảng mã Unicode:** Phát hiện "
+            f"{len(legacy_runs)} đoạn dùng font/bảng mã cũ ({font_list}); "
+            "đã bôi đỏ. Chương trình giữ nguyên font cũ để tránh làm sai "
+            "dấu tiếng Việt; học viên cần chuyển nội dung sang Unicode."
+        )
+    return legacy_runs
+
+
 def process_docx_file(uploaded_bytes, rules, template_path=None):
     doc = docx.Document(io.BytesIO(uploaded_bytes))
     font_target = rules["font_name"]
     size_target = float(rules["font_size"])
+    allowed_font_sizes = {
+        float(value)
+        for value in rules.get("allowed_font_sizes", [13.0, 14.0])
+    }
+    if size_target not in allowed_font_sizes:
+        size_target = 13.0
     line_target = float(rules["line_spacing"])
     target_left = float(rules["margin_left"])
     target_right = float(rules["margin_right"])
@@ -1755,6 +1999,11 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
     ethics_errors = fix_ethics_section(doc)
     detailed_errors.extend(cover_errors)
     detailed_errors.extend(ethics_errors)
+    legacy_run_elements = detect_legacy_vietnamese_fonts(
+        doc,
+        cover_p_elements,
+        detailed_errors,
+    )
 
     for idx, section in enumerate(doc.sections):
         current_left = (
@@ -1873,10 +2122,45 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
             "🟥 **Trích dẫn chỉ có tên tác giả:** Cần bổ sung năm; "
             f"đã bôi đỏ {action_counts['author_missing_year']} vị trí."
         )
-    if action_counts["reference_removed_et_al"]:
+    if action_counts["reference_added_et_al"]:
         detailed_errors.append(
-            "📚 **Tài liệu tham khảo:** Đã bỏ 'và cộng sự/et al.' "
-            f"tại {action_counts['reference_removed_et_al']} vị trí."
+            "📚 **Tài liệu tham khảo:** Đã bổ sung 'và cộng sự' hoặc "
+            f"'et al.' sau 3 tác giả đầu tại "
+            f"{action_counts['reference_added_et_al']} vị trí."
+        )
+    if action_counts["reference_trimmed_authors"]:
+        detailed_errors.append(
+            "📚 **Tài liệu tham khảo:** Đã giữ 3 tác giả đầu và rút gọn "
+            f"danh sách tác giả tại "
+            f"{action_counts['reference_trimmed_authors']} vị trí."
+        )
+    if action_counts["reference_parenthesized_year"]:
+        detailed_errors.append(
+            "📅 **Năm xuất bản:** Đã đưa năm vào ngoặc đơn tại "
+            f"{action_counts['reference_parenthesized_year']} vị trí."
+        )
+    if action_counts["reference_missing_year"]:
+        detailed_errors.append(
+            "🟥 **Tài liệu tham khảo thiếu năm:** Đã bôi đỏ "
+            f"{action_counts['reference_missing_year']} mục để bổ sung."
+        )
+    if action_counts["reference_author_name_warning"]:
+        detailed_errors.append(
+            "🟨 **Tên tác giả trong tài liệu tham khảo:** Đã bôi vàng "
+            f"{action_counts['reference_author_name_warning']} mục có dấu "
+            "hiệu viết tắt tên Việt Nam hoặc chưa viết tắt tên nước ngoài."
+        )
+    if action_counts["reference_styled"]:
+        detailed_errors.append(
+            "📖 **Định dạng tài liệu tham khảo:** Đã đặt tên bài báo in "
+            "đứng, tên tạp chí in nghiêng và tập/số in đậm tại "
+            f"{action_counts['reference_styled']} mục."
+        )
+    if action_counts["reference_structure_warning"]:
+        detailed_errors.append(
+            "🟨 **Cấu trúc tài liệu tham khảo:** Có "
+            f"{action_counts['reference_structure_warning']} mục chưa nhận "
+            "diện đủ tên bài báo – tên tạp chí – tập/số – trang; đã bôi vàng."
         )
     if action_counts["reference_removed_tr"]:
         detailed_errors.append(
@@ -1899,6 +2183,7 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
             f"{citation_moved_count} vị trí."
         )
 
+    font_size_corrected_count = 0
     for paragraph in paragraphs:
         if not paragraph.text.strip():
             continue
@@ -1907,9 +2192,18 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
             paragraph.paragraph_format.space_before = Pt(0)
             paragraph.paragraph_format.space_after = Pt(0)
             for run in paragraph.runs:
+                if run._element in legacy_run_elements:
+                    continue
                 run.font.name = font_target
                 if not run.font.superscript:
-                    run.font.size = Pt(size_target)
+                    current_size = (
+                        round(run.font.size.pt, 1)
+                        if run.font.size is not None
+                        else None
+                    )
+                    if current_size not in allowed_font_sizes:
+                        run.font.size = Pt(size_target)
+                        font_size_corrected_count += 1
 
     for table in doc.tables:
         for row in table.rows:
@@ -1925,9 +2219,26 @@ def process_docx_file(uploaded_bytes, rules, template_path=None):
                     )
                     paragraph.paragraph_format.line_spacing = line_target
                     for run in paragraph.runs:
+                        if run._element in legacy_run_elements:
+                            continue
                         run.font.name = font_target
                         if not run.font.superscript:
-                            run.font.size = Pt(size_target)
+                            current_size = (
+                                round(run.font.size.pt, 1)
+                                if run.font.size is not None
+                                else None
+                            )
+                            if current_size not in allowed_font_sizes:
+                                run.font.size = Pt(size_target)
+                                font_size_corrected_count += 1
+
+    if font_size_corrected_count:
+        detailed_errors.append(
+            "🔤 **Font và cỡ chữ:** Đã dùng Times New Roman; giữ nguyên "
+            "các chữ cỡ 13 hoặc 14 và đưa "
+            f"{font_size_corrected_count} đoạn chữ ngoài hai cỡ này về "
+            f"{size_target:g} pt."
+        )
 
     output = io.BytesIO()
     doc.save(output)
@@ -2090,10 +2401,11 @@ def main():
         "Font chữ thân bài",
         value=parsed_rules.get("font_name", "Times New Roman"),
     )
-    final_size = st.sidebar.number_input(
-        "Cỡ chữ (pt)",
-        value=float(parsed_rules.get("font_size", 13.0)),
-        step=0.5,
+    parsed_size = float(parsed_rules.get("font_size", 13.0))
+    final_size = st.sidebar.selectbox(
+        "Cỡ chữ chuẩn (chấp nhận 13 hoặc 14 pt)",
+        options=[13.0, 14.0],
+        index=1 if parsed_size == 14.0 else 0,
     )
     final_spacing = st.sidebar.number_input(
         "Giãn dòng",
@@ -2103,7 +2415,7 @@ def main():
     st.sidebar.subheader("📐 Căn Lề Trang (cm)")
     final_left = st.sidebar.number_input(
         "Lề trái",
-        value=float(parsed_rules.get("margin_left", 3.0)),
+        value=float(parsed_rules.get("margin_left", 3.5)),
         step=0.5,
     )
     final_right = st.sidebar.number_input(
@@ -2124,6 +2436,7 @@ def main():
     active_rules = {
         "font_name": final_font,
         "font_size": final_size,
+        "allowed_font_sizes": [13.0, 14.0],
         "line_spacing": final_spacing,
         "margin_left": final_left,
         "margin_right": final_right,
