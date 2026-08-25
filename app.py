@@ -283,9 +283,16 @@ def get_reference_heading_format(doc):
 
 def fix_ethics_section(doc):
     detailed_errors = []
+    # Chỉ nhận diện khi TOÀN BỘ đoạn là tiêu đề. Không dùng ``search`` vì
+    # cụm "đạo đức trong nghiên cứu" có thể xuất hiện giữa câu nội dung.
     ethics_pattern = re.compile(
-        r"(2\.\d+\.?\s*)?"
-        r"(vấn đề đạo đức trong nghiên cứu|đạo đức trong nghiên cứu)",
+        r"^\s*(?:2\.\d+\.?\s*)?"
+        r"(?:vấn đề\s+)?đạo\s+đức(?:\s+trong)?\s+nghiên\s+cứu"
+        r"\s*[.:]?\s*$",
+        re.IGNORECASE,
+    )
+    false_split_pattern = re.compile(
+        r"^\s*(?:vấn đề\s+)?đạo\s+đức(?:\s+trong)?\s+nghiên\s+cứu\b",
         re.IGNORECASE,
     )
     ref_fmt = get_reference_heading_format(doc)
@@ -301,48 +308,58 @@ def fix_ethics_section(doc):
         if ref_fmt["space_after"] is not None:
             fmt.space_after = ref_fmt["space_after"]
 
-    for idx, paragraph in enumerate(list(doc.paragraphs)):
-        text = paragraph.text
-        if not text.strip():
+    # Sửa lại tài liệu đã bị phiên bản cũ tách sai: đoạn sau bắt đầu bằng
+    # cụm trên, run đầu được in đậm + bôi vàng, còn đoạn trước chưa kết câu.
+    paragraphs = list(doc.paragraphs)
+    for idx in range(1, len(paragraphs)):
+        paragraph = paragraphs[idx]
+        previous = paragraphs[idx - 1]
+        text = paragraph.text.strip()
+        if not text or ethics_pattern.fullmatch(text):
             continue
-        match = ethics_pattern.search(text)
-        if not match:
+        first_run = next((run for run in paragraph.runs if run.text), None)
+        was_old_false_split = (
+            false_split_pattern.match(text)
+            and first_run is not None
+            and first_run.bold is True
+            and first_run.font.highlight_color == WD_COLOR_INDEX.YELLOW
+            and previous.text.strip()
+            and not re.search(r"[.!?:;]\s*$", previous.text)
+        )
+        if not was_old_false_split:
             continue
 
-        start_pos = match.start()
-        matched_text = match.group(0)
-        if start_pos > 0 and text[:start_pos].strip():
-            detailed_errors.append(
-                f"⚠️ **Đoạn {idx + 1}:** Mục {matched_text} bị dính câu "
-                "trước. Đã ngắt dòng, in đậm, căn lề và bôi vàng."
-            )
-            text_before = text[:start_pos].rstrip()
-            text_after = text[start_pos:].lstrip()
-            paragraph.text = text_before
-            new_paragraph = doc.add_paragraph()
-            paragraph._p.addnext(new_paragraph._p)
-            title_run = new_paragraph.add_run(matched_text)
-            title_run.bold = True
-            title_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-            apply_heading_format(new_paragraph)
-            rest_text = text_after[len(matched_text) :]
-            if rest_text:
-                rest_run = new_paragraph.add_run(rest_text)
-                rest_run.bold = False
-        else:
-            apply_heading_format(paragraph)
-            detailed_errors.append(
-                f"📏 **Mục {matched_text}:** Đã căn thẳng hàng với "
-                "2.1, 2.2, 2.3 và bôi vàng."
-            )
-            paragraph.text = ""
-            title_run = paragraph.add_run(matched_text)
-            title_run.bold = True
-            title_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-            rest_text = text[len(matched_text) :]
-            if rest_text:
-                rest_run = paragraph.add_run(rest_text)
-                rest_run.bold = False
+        if not previous.text.endswith((" ", "\t")):
+            previous.add_run(" ")
+        first_run.text = first_run.text.lstrip()
+        first_run.bold = False
+        first_run.font.highlight_color = None
+        for run in list(paragraph.runs):
+            previous._p.append(run._r)
+        paragraph._element.getparent().remove(paragraph._element)
+        detailed_errors.append(
+            f"🧹 **Đoạn {idx + 1}:** Đã nối lại câu từng bị tách sai "
+            "tại cụm 'đạo đức trong nghiên cứu'."
+        )
+
+    for idx, paragraph in enumerate(list(doc.paragraphs)):
+        text = paragraph.text.strip()
+        if not text or not ethics_pattern.fullmatch(text):
+            continue
+
+        apply_heading_format(paragraph)
+        if not paragraph.runs:
+            paragraph.add_run(text)
+        for run in paragraph.runs:
+            if not run.text:
+                continue
+            run.bold = True
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        detailed_errors.append(
+            f"📏 **Mục {text}:** Đã nhận diện đúng là tiêu đề, căn "
+            "thẳng hàng với 2.1, 2.2, 2.3 và bôi vàng; không tách "
+            "các câu nội dung có cùng cụm từ."
+        )
     return detailed_errors
 
 
