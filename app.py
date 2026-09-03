@@ -1,4 +1,5 @@
 import difflib
+import copy
 import io
 import json
 import os
@@ -39,6 +40,14 @@ DEFAULT_RULES = {
     "margin_bottom": 3.0,
     "margin_left": 3.5,
     "margin_right": 2.0,
+    # Các khóa dưới đây quyết định những kiểm tra nghiệp vụ nào được chạy.
+    # File PDF có thể ghi đè các giá trị này sau khi được đọc.
+    "citation_style": "numeric_superscript",
+    "require_image_source": True,
+    "require_image_caption": True,
+    "check_abbreviations": True,
+    "check_subjectless_sentences": True,
+    "normalize_references": True,
     "detailed_requirements": [
         "Bảng mã Unicode; Times New Roman cỡ 13 hoặc 14; giãn dòng 1,5.",
         "Lề trên 3,5 cm; dưới 3,0 cm; trái 3,5 cm; phải 2,0 cm.",
@@ -48,6 +57,114 @@ DEFAULT_RULES = {
         "đứng; tên tạp chí in nghiêng; tập/số in đậm; trang chỉ ghi số.",
     ],
 }
+
+
+# Mỗi lựa chọn luôn gắn với đúng MỘT template và MỘT file quy định.
+# Có thể đổi tên file tại đây, nhưng không nên cho học viên tự chọn hai tệp
+# độc lập vì rất dễ ghép nhầm quy định của loại này với template của loại khác.
+DOCUMENT_PROFILES = {
+    "master_research": {
+        "label": "Luận văn thạc sĩ định hướng nghiên cứu",
+        "short_label": "Thạc sĩ nghiên cứu",
+        "template_file": (
+            "Văn_Luận văn Thạc sĩ nghiên cứu -Template 2026.docx"
+        ),
+        "template_aliases": ["luan_van_thac_si_nghien_cuu.docx"],
+        "regulation_file": "quy_dinh_luan_van_thac_si_nghien_cuu.pdf",
+        "output_file": "LuanVan_ThacSi_NghienCuu_DaKiemTra.docx",
+    },
+    "master_application": {
+        "label": "Luận văn thạc sĩ định hướng ứng dụng",
+        "short_label": "Thạc sĩ ứng dụng",
+        "template_file": (
+            "Văn_Luận văn Thạc sĩ ứng dụng -Template 2026.docx"
+        ),
+        "template_aliases": ["luan_van_thac_si_ung_dung.docx"],
+        "regulation_file": "quy_dinh_luan_van_thac_si_ung_dung.pdf",
+        "output_file": "LuanVan_ThacSi_UngDung_DaKiemTra.docx",
+    },
+    "proposal_master_research": {
+        "label": "Đề cương luận văn thạc sĩ định hướng nghiên cứu",
+        "short_label": "Đề cương thạc sĩ nghiên cứu",
+        "template_file": (
+            "Văn_Template_Đề cương_Luận văn Thạc sĩ nghiên cứu "
+            "-Template 2026.docx"
+        ),
+        "template_aliases": [
+            "de_cuong_luan_van_thac_si_nghien_cuu.docx"
+        ],
+        "regulation_file": (
+            "quy_dinh_de_cuong_luan_van_thac_si_nghien_cuu.pdf"
+        ),
+        "output_file": "DeCuong_ThacSi_NghienCuu_DaKiemTra.docx",
+    },
+    "proposal_master_application": {
+        "label": "Đề cương luận văn thạc sĩ định hướng ứng dụng",
+        "short_label": "Đề cương thạc sĩ ứng dụng",
+        "template_file": (
+            "Văn_Template_Đề cương_Luận văn Thạc sĩ ứng dụng "
+            "-Template 2026.docx"
+        ),
+        "template_aliases": [
+            "de_cuong_luan_van_thac_si_ung_dung.docx"
+        ],
+        "regulation_file": (
+            "quy_dinh_de_cuong_luan_van_thac_si_ung_dung.pdf"
+        ),
+        "output_file": "DeCuong_ThacSi_UngDung_DaKiemTra.docx",
+    },
+}
+
+
+def _copy_default_rules():
+    """Tạo bản sao sâu để các lần chạy Streamlit không dùng chung list."""
+    return copy.deepcopy(DEFAULT_RULES)
+
+
+def _filename_key(filename):
+    """So tên file không phụ thuộc cách Windows/macOS lưu dấu tiếng Việt."""
+    normalized = unicodedata.normalize("NFD", str(filename)).replace("Đ", "D")
+    normalized = normalized.replace("đ", "d")
+    normalized = "".join(
+        char for char in normalized if unicodedata.category(char) != "Mn"
+    )
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
+def _resolve_named_asset(folder, preferred_name, aliases=None):
+    candidates = [preferred_name, *(aliases or [])]
+    if os.path.isdir(folder):
+        actual_names = {
+            _filename_key(name): name
+            for name in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, name))
+        }
+        for candidate in candidates:
+            actual_name = actual_names.get(_filename_key(candidate))
+            if actual_name:
+                return os.path.join(folder, actual_name), actual_name
+    return os.path.join(folder, preferred_name), preferred_name
+
+
+def resolve_profile_paths(app_directory, profile):
+    """Trả về đường dẫn tuyệt đối của đúng cặp template – quy định."""
+    template_path, actual_template_name = _resolve_named_asset(
+        os.path.join(app_directory, "template"),
+        profile["template_file"],
+        profile.get("template_aliases"),
+    )
+    regulation_path, actual_regulation_name = _resolve_named_asset(
+        os.path.join(app_directory, "quy_dinh"),
+        profile["regulation_file"],
+        profile.get("regulation_aliases"),
+    )
+    return {
+        **profile,
+        "template_path": template_path,
+        "regulation_path": regulation_path,
+        "resolved_template_file": actual_template_name,
+        "resolved_regulation_file": actual_regulation_name,
+    }
 
 
 def extract_raw_text_from_pdf(pdf_path):
@@ -67,13 +184,191 @@ def extract_raw_text_from_pdf(pdf_path):
         return ""
 
 
-def analyze_rules_with_gemini(pdf_text, api_key):
-    default_rules = dict(DEFAULT_RULES)
-    default_rules["detailed_requirements"] = list(
-        DEFAULT_RULES["detailed_requirements"]
+def _vi_number(value, fallback=None):
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def analyze_rules_locally(pdf_text):
+    """Đọc các thông số phổ biến ngay cả khi máy chủ không có khóa AI.
+
+    Đây là lớp dự phòng bắt buộc: trước đây nếu thiếu GEMINI_API_KEY thì PDF
+    được hiển thị là "đã đọc" nhưng thực tế chương trình vẫn dùng DEFAULT_RULES.
+    """
+    rules = _copy_default_rules()
+    if not pdf_text:
+        return rules
+
+    clean_text = re.sub(r"\s+", " ", pdf_text.replace("\xa0", " "))
+
+    font_match = re.search(
+        r"(?i)font(?:\s+chữ)?\s*(?:là|:)?\s*"
+        r"(Times\s+New\s+Roman|Arial|Calibri|Tahoma)",
+        clean_text,
     )
+    if not font_match:
+        font_match = re.search(
+            r"(?i)\b(Times\s+New\s+Roman|Arial|Calibri|Tahoma)\b",
+            clean_text,
+        )
+    if font_match:
+        rules["font_name"] = re.sub(r"\s+", " ", font_match.group(1)).title()
+        if rules["font_name"] == "Times New Roman":
+            rules["font_name"] = "Times New Roman"
+
+    sizes = []
+    # Ưu tiên mẫu nêu rõ hai cỡ được phép cho thân bài. Không gom mọi con số
+    # "cỡ" trong PDF vì cỡ tiêu đề/bìa thường khác cỡ chữ nội dung.
+    range_match = re.search(
+        r"(?i)cỡ(?:\s+chữ)?\s*(\d{1,2}(?:[.,]\d+)?)\s*"
+        r"(?:hoặc|và|đến|[-–—/])\s*(\d{1,2}(?:[.,]\d+)?)",
+        clean_text,
+    )
+    if range_match:
+        for value in range_match.groups():
+            number = _vi_number(value)
+            if number and 8 <= number <= 30 and number not in sizes:
+                sizes.append(number)
+    if not sizes:
+        body_size_match = re.search(
+            r"(?i)(?:nội\s+dung|thân\s+bài|toàn\s+văn|luận\s+văn|"
+            r"đề\s+cương|Times\s+New\s+Roman).{0,100}?"
+            r"(?:cỡ|size)\s*(?:chữ\s*)?(?:là|:)?\s*"
+            r"(\d{1,2}(?:[.,]\d+)?)",
+            clean_text,
+        )
+        if body_size_match:
+            number = _vi_number(body_size_match.group(1))
+            if number and 8 <= number <= 30:
+                sizes.append(number)
+    if sizes:
+        rules["allowed_font_sizes"] = sizes
+        rules["font_size"] = sizes[0]
+
+    spacing_match = re.search(
+        r"(?i)(?:giãn|dãn|khoảng\s+cách)\s*dòng[^\d]{0,30}"
+        r"(\d(?:[.,]\d+)?)",
+        clean_text,
+    )
+    if spacing_match:
+        spacing = _vi_number(spacing_match.group(1))
+        if spacing and 0.8 <= spacing <= 3:
+            rules["line_spacing"] = spacing
+
+    margin_patterns = {
+        "margin_top": r"(?i)lề\s+trên[^\d]{0,20}(\d+(?:[.,]\d+)?)\s*(?:cm)?",
+        "margin_bottom": r"(?i)lề\s+dưới[^\d]{0,20}(\d+(?:[.,]\d+)?)\s*(?:cm)?",
+        "margin_left": r"(?i)lề\s+trái[^\d]{0,20}(\d+(?:[.,]\d+)?)\s*(?:cm)?",
+        "margin_right": r"(?i)lề\s+phải[^\d]{0,20}(\d+(?:[.,]\d+)?)\s*(?:cm)?",
+    }
+    for key, pattern in margin_patterns.items():
+        match = re.search(pattern, clean_text)
+        if match:
+            value = _vi_number(match.group(1))
+            if value and 0.5 <= value <= 8:
+                rules[key] = value
+
+    if re.search(r"(?i)\b(?:APA|Harvard|tác\s+giả\s*[-–]\s*năm)\b", clean_text):
+        rules["citation_style"] = "author_year"
+    elif re.search(r"(?i)(?:ngoặc\s+vuông|\[\s*\d+\s*\])", clean_text):
+        rules["citation_style"] = "numeric_brackets"
+    elif re.search(r"(?i)(?:số\s+mũ|lũy\s+thừa|superscript)", clean_text):
+        rules["citation_style"] = "numeric_superscript"
+
+    meaningful_lines = []
+    for raw_line in pdf_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if (
+            not line
+            or line.startswith("--- TRANG")
+            or len(line) < 18
+            or line in meaningful_lines
+        ):
+            continue
+        meaningful_lines.append(line)
+        if len(meaningful_lines) >= 30:
+            break
+    if meaningful_lines:
+        rules["detailed_requirements"] = meaningful_lines
+    return rules
+
+
+def _merge_rule_payload(base_rules, payload):
+    """Chỉ nhận các khóa đã biết và giữ giá trị dự phòng khi AI thiếu khóa."""
+    if not isinstance(payload, dict):
+        return base_rules
+    merged = copy.deepcopy(base_rules)
+    allowed_keys = set(DEFAULT_RULES)
+    for key, value in payload.items():
+        if key in allowed_keys and value is not None:
+            merged[key] = value
+
+    numeric_keys = {
+        "font_size",
+        "line_spacing",
+        "margin_top",
+        "margin_bottom",
+        "margin_left",
+        "margin_right",
+    }
+    for key in numeric_keys:
+        parsed = _vi_number(merged.get(key), base_rules.get(key))
+        merged[key] = parsed
+
+    raw_sizes = merged.get("allowed_font_sizes", [])
+    if not isinstance(raw_sizes, (list, tuple, set)):
+        raw_sizes = [raw_sizes]
+    sizes = []
+    for value in raw_sizes:
+        parsed = _vi_number(value)
+        if parsed and 8 <= parsed <= 30 and parsed not in sizes:
+            sizes.append(parsed)
+    merged["allowed_font_sizes"] = sizes or list(
+        base_rules.get("allowed_font_sizes", [merged["font_size"]])
+    )
+
+    boolean_keys = {
+        "require_image_source",
+        "require_image_caption",
+        "check_abbreviations",
+        "check_subjectless_sentences",
+        "normalize_references",
+    }
+    for key in boolean_keys:
+        value = merged.get(key)
+        if isinstance(value, str):
+            merged[key] = value.strip().lower() not in {
+                "false", "0", "no", "không", "none",
+            }
+        else:
+            merged[key] = bool(value)
+
+    allowed_citation_styles = {
+        "numeric_superscript",
+        "numeric_brackets",
+        "author_year",
+        "keep",
+    }
+    citation_style = str(merged.get("citation_style", "keep")).lower()
+    if citation_style not in allowed_citation_styles:
+        citation_style = str(base_rules.get("citation_style", "keep"))
+    merged["citation_style"] = citation_style
+
+    requirements = merged.get("detailed_requirements", [])
+    if isinstance(requirements, str):
+        requirements = [requirements]
+    merged["detailed_requirements"] = [
+        str(item).strip() for item in requirements if str(item).strip()
+    ]
+    return merged
+
+
+def analyze_rules_with_gemini(pdf_text, api_key):
+    local_rules = analyze_rules_locally(pdf_text)
     if not pdf_text or not api_key:
-        return default_rules
+        return local_rules
 
     prompt = f"""
 Bạn là chuyên gia kiểm tra định dạng luận văn. Hãy đọc TOÀN BỘ văn bản quy
@@ -93,6 +388,12 @@ Markdown:
   "margin_bottom": 3.0,
   "margin_left": 3.5,
   "margin_right": 2.0,
+  "citation_style": "numeric_superscript | numeric_brackets | author_year | keep",
+  "require_image_source": true,
+  "require_image_caption": true,
+  "check_abbreviations": true,
+  "check_subjectless_sentences": true,
+  "normalize_references": true,
   "detailed_requirements": ["Các quy định cụ thể tìm thấy trong PDF"]
 }}
 """
@@ -118,7 +419,10 @@ Markdown:
                         .replace(fence, "")
                         .strip()
                     )
-                    return json.loads(clean_json)
+                    return _merge_rule_payload(
+                        local_rules,
+                        json.loads(clean_json),
+                    )
             except Exception:
                 pass
 
@@ -135,11 +439,29 @@ Markdown:
                         .replace(fence, "")
                         .strip()
                     )
-                    return json.loads(clean_json)
+                    return _merge_rule_payload(
+                        local_rules,
+                        json.loads(clean_json),
+                    )
             except Exception:
                 pass
 
-    return default_rules
+    return local_rules
+
+
+def _load_rules_for_pdf(pdf_path, file_mtime, api_key):
+    # file_mtime là một phần của khóa cache: thay PDF thì quy định được đọc lại.
+    del file_mtime
+    pdf_text = extract_raw_text_from_pdf(pdf_path)
+    return pdf_text, analyze_rules_with_gemini(pdf_text, api_key)
+
+
+if st is not None:
+    load_rules_for_pdf = st.cache_data(show_spinner=False)(
+        _load_rules_for_pdf
+    )
+else:
+    load_rules_for_pdf = _load_rules_for_pdf
 
 
 def optimize_cover_pages(doc):
@@ -816,6 +1138,11 @@ AUTHOR_WORD = r"[A-ZÀ-Ỹ][A-Za-zÀ-ỹ'’.-]*"
 AUTHOR_NAME = rf"{AUTHOR_WORD}(?:\s+{AUTHOR_WORD}){{0,4}}"
 AUTHOR_SUFFIX = r"(?:\s+và\s+cộng\s+sự)?"
 YEAR_PATTERN = r"(?:19|20)\d{2}[a-z]?"
+AUTHOR_REPORTING_VERB = (
+    r"(?:cho\s+rằng|nhận\s+thấy|ghi\s+nhận|chỉ\s+ra|báo\s+cáo|"
+    r"kết\s+luận|đề\s+xuất|mô\s+tả|phát\s+hiện|nghiên\s+cứu|"
+    r"thực\s+hiện|công\s+bố|khảo\s+sát|đánh\s+giá|phân\s+tích)"
+)
 
 
 def _looks_like_person_author(author_text):
@@ -857,6 +1184,20 @@ def _merge_ranges(ranges):
 
 
 def _find_author_citations_missing_year(text):
+    def has_year_in_same_clause(start, end):
+        """Chấp nhận năm ở trước hoặc sau tác giả trong cùng câu/cụm."""
+        left_boundary = max(
+            text.rfind(mark, 0, start) for mark in (".", "!", "?", ";", "\n")
+        )
+        right_candidates = [
+            position
+            for mark in (".", "!", "?", ";", "\n")
+            if (position := text.find(mark, end)) != -1
+        ]
+        right_boundary = min(right_candidates) if right_candidates else len(text)
+        clause = text[left_boundary + 1 : right_boundary]
+        return bool(re.search(YEAR_PATTERN, clause, re.IGNORECASE))
+
     ranges = []
     narrative_pattern = re.compile(
         rf"\b(?i:Theo|Nghiên cứu của|Báo cáo của|Tác giả|"
@@ -866,35 +1207,50 @@ def _find_author_citations_missing_year(text):
         if not _looks_like_person_author(match.group("author")):
             continue
         start, end = match.span("author")
-        lookahead = text[end : end + 40]
-        if not re.search(YEAR_PATTERN, lookahead):
+        if not has_year_in_same_clause(start, end):
             ranges.append((start, end))
 
     parenthetical_pattern = re.compile(
         rf"\((?P<author>{AUTHOR_NAME}{AUTHOR_SUFFIX})\)"
     )
     for match in parenthetical_pattern.finditer(text):
-        if _looks_like_person_author(match.group("author")):
+        start, end = match.span("author")
+        if (
+            _looks_like_person_author(match.group("author"))
+            and not has_year_in_same_clause(start, end)
+        ):
             ranges.append(match.span("author"))
 
     reporting_pattern = re.compile(
         rf"(?<!Theo )(?<!THEO )\b"
         rf"(?P<author>{AUTHOR_NAME}{AUTHOR_SUFFIX})\s+"
-        rf"(?i:cho rằng|nhận thấy|ghi nhận|chỉ ra|báo cáo|"
-        rf"kết luận|đề xuất|mô tả|phát hiện)"
+        rf"(?i:{AUTHOR_REPORTING_VERB})"
     )
     for match in reporting_pattern.finditer(text):
         if not _looks_like_person_author(match.group("author")):
             continue
         start, end = match.span("author")
-        lookaround = text[max(0, start - 10) : min(len(text), end + 40)]
-        if not re.search(YEAR_PATTERN, lookaround):
+        if not has_year_in_same_clause(start, end):
             ranges.append((start, end))
 
-    for match in re.finditer(r"và\s+cộng\s+sự", text, re.IGNORECASE):
-        start, end = match.span()
-        lookaround = text[max(0, start - 10) : min(len(text), end + 35)]
-        if not re.search(YEAR_PATTERN, lookaround):
+    # Quét riêng mọi cụm "tên tác giả và cộng sự" để vẫn phát hiện được
+    # trường hợp không đi kèm các động từ tường thuật ở trên.
+    author_with_suffix_pattern = re.compile(
+        rf"\b(?P<author>{AUTHOR_NAME}\s+(?i:và\s+cộng\s+sự))\b"
+    )
+    for match in author_with_suffix_pattern.finditer(text):
+        start, end = match.span("author")
+        if (
+            _looks_like_person_author(
+                re.sub(
+                    r"\s+và\s+cộng\s+sự$",
+                    "",
+                    match.group("author"),
+                    flags=re.IGNORECASE,
+                )
+            )
+            and not has_year_in_same_clause(start, end)
+        ):
             ranges.append((start, end))
     return _merge_ranges(ranges)
 
@@ -1200,6 +1556,31 @@ def fix_author_citations(paragraph, in_references_section=False):
         working_text,
     )
 
+    # Năm đứng trước tác giả, ví dụ:
+    # "Năm 2024, Nguyễn Văn A ghi nhận...".
+    year_before_author = re.compile(
+        rf"\b(?P<prefix>(?i:(?:Vào\s+|Trong\s+)?Năm))\s+"
+        rf"(?P<year>{YEAR_PATTERN})(?P<separator>\s*[,;:-]\s*)"
+        rf"(?P<author>{AUTHOR_NAME})"
+        rf"(?!\s+và\s+cộng\s+sự)"
+        rf"(?=\s+(?i:{AUTHOR_REPORTING_VERB})\b)"
+    )
+
+    def replace_year_before_author(match):
+        author = match.group("author").strip()
+        if not _looks_like_person_author(author):
+            return match.group(0)
+        actions.append("body_added_et_al")
+        return (
+            f"{match.group('prefix')} {match.group('year')}"
+            f"{match.group('separator')}{author} và cộng sự"
+        )
+
+    working_text = year_before_author.sub(
+        replace_year_before_author,
+        working_text,
+    )
+
     standalone_with_year = re.compile(
         rf"\b(?P<author>{AUTHOR_NAME})"
         rf"(?!\s+và\s+cộng\s+sự)\s*"
@@ -1222,8 +1603,8 @@ def fix_author_citations(paragraph, in_references_section=False):
 
     missing_year_ranges = _find_author_citations_missing_year(working_text)
     actions.extend(["author_missing_year"] * len(missing_year_ranges))
-    missing_year_red_ranges = [
-        (start, end, WD_COLOR_INDEX.RED)
+    missing_year_yellow_ranges = [
+        (start, end, WD_COLOR_INDEX.YELLOW)
         for start, end in missing_year_ranges
     ]
 
@@ -1232,7 +1613,7 @@ def fix_author_citations(paragraph, in_references_section=False):
             paragraph,
             working_text,
             highlight_changes=working_text != original_text,
-            highlight_ranges=missing_year_red_ranges,
+            highlight_ranges=missing_year_yellow_ranges,
         )
     return actions
 
@@ -1363,6 +1744,9 @@ COVER_END_STRUCTURE_KEYS = {
     "MUC LUC",
     "DANH MUC CHU VIET TAT",
     "DANH MUC BANG",
+    "DANH MUC BIEU DO",
+    "DANH MUC HINH",
+    "DANH MUC SO DO",
     "DANH MUC HINH SO DO BIEU DO",
     "DAT VAN DE",
 }
@@ -1406,6 +1790,8 @@ def check_image_citations(
     cover_p_elements,
     detailed_errors,
     font_target,
+    require_source=True,
+    require_caption=True,
 ):
     """
     Quét hình trong thân bài, bảng và text box.
@@ -1461,7 +1847,9 @@ def check_image_citations(
             for item in source_paragraphs
         )
 
-        if has_caption and has_source:
+        caption_ok = has_caption or not require_caption
+        source_ok = has_source or not require_source
+        if caption_ok and source_ok:
             continue
 
         already_warned = any(
@@ -1469,10 +1857,10 @@ def check_image_citations(
             for item in nearby_paragraphs
         )
         missing_items = []
-        if not has_source:
+        if require_source and not has_source:
             missing_source_count += 1
             missing_items.append("chưa có trích dẫn nguồn")
-        if not has_caption:
+        if require_caption and not has_caption:
             missing_caption_count += 1
             missing_items.append("chưa có tên/chú thích hình")
 
@@ -1544,16 +1932,34 @@ STRUCTURE_LABELS = {
     "MUC LUC": "Mục lục",
     "DANH MUC CHU VIET TAT": "Danh mục chữ viết tắt",
     "DANH MUC BANG": "Danh mục bảng",
+    "DANH MUC BIEU DO": "Danh mục biểu đồ",
+    "DANH MUC HINH": "Danh mục hình",
+    "DANH MUC SO DO": "Danh mục sơ đồ",
     "DANH MUC HINH SO DO BIEU DO": (
         "Danh mục hình, sơ đồ, biểu đồ"
     ),
     "DAT VAN DE": "Đặt vấn đề",
+    "MUC TIEU NGHIEN CUU": "Mục tiêu nghiên cứu",
+    "CAU HOI NGHIEN CUU": "Câu hỏi nghiên cứu",
+    "GIA THUYET NGHIEN CUU": "Giả thuyết nghiên cứu",
     "TONG QUAN": "Tổng quan",
     "DOI TUONG VA PHUONG PHAP NGHIEN CUU": (
         "Đối tượng và phương pháp nghiên cứu"
     ),
     "KET QUA": "Kết quả",
     "BAN LUAN": "Bàn luận",
+    "DU KIEN KET QUA": "Dự kiến kết quả",
+    "DU KIEN BAN LUAN": "Dự kiến bàn luận",
+    "DU DOAN KET QUA VA BAN LUAN": (
+        "Dự đoán kết quả và bàn luận"
+    ),
+    "DU KIEN KET QUA VA BAN LUAN": (
+        "Dự kiến kết quả và bàn luận"
+    ),
+    "KE HOACH NGHIEN CUU": "Kế hoạch nghiên cứu",
+    "TIEN DO THUC HIEN": "Tiến độ thực hiện",
+    "DU TRU KINH PHI": "Dự trù kinh phí",
+    "SAN PHAM DU KIEN": "Sản phẩm dự kiến",
     "KET LUAN": "Kết luận",
     "KIEN NGHI": "Kiến nghị",
     "TAI LIEU THAM KHAO": "Tài liệu tham khảo",
@@ -1567,9 +1973,22 @@ OPTIONAL_STRUCTURE_KEYS = {"KIEN NGHI", "PHU LUC"}
 
 def _canonical_structure_key(text):
     normalized = _normalize_heading(text)
+    proposal_combined_aliases = {
+        "DU DOAN KET QUA VA BAN LUAN": (
+            "DU DOAN KET QUA VA BAN LUAN"
+        ),
+        "DU KIEN KET QUA VA BAN LUAN": (
+            "DU KIEN KET QUA VA BAN LUAN"
+        ),
+        "DU KIEN KET QUA NGHIEN CUU VA BAN LUAN": (
+            "DU KIEN KET QUA VA BAN LUAN"
+        ),
+    }
+    if normalized in proposal_combined_aliases:
+        return proposal_combined_aliases[normalized]
     if re.search(
-        r"\b(?:KET QUA\s+VA\s+BAN LUAN|"
-        r"BAN LUAN\s+VA\s+KET QUA)\b",
+        r"^(?:KET QUA\s+VA\s+BAN LUAN|"
+        r"BAN LUAN\s+VA\s+KET QUA)$",
         normalized,
     ):
         return "MERGED_RESULTS_DISCUSSION"
@@ -1588,8 +2007,13 @@ def _canonical_structure_key(text):
         "DANH MUC CHU VIET TAT": "DANH MUC CHU VIET TAT",
         "DANH MUC BANG": "DANH MUC BANG",
         "DANH MUC CAC BANG": "DANH MUC BANG",
-        "DANH MUC HINH": "DANH MUC HINH SO DO BIEU DO",
-        "DANH MUC HINH ANH": "DANH MUC HINH SO DO BIEU DO",
+        "DANH MUC BIEU DO": "DANH MUC BIEU DO",
+        "DANH MUC CAC BIEU DO": "DANH MUC BIEU DO",
+        "DANH MUC HINH": "DANH MUC HINH",
+        "DANH MUC CAC HINH": "DANH MUC HINH",
+        "DANH MUC HINH ANH": "DANH MUC HINH",
+        "DANH MUC SO DO": "DANH MUC SO DO",
+        "DANH MUC CAC SO DO": "DANH MUC SO DO",
         "DANH MUC HINH SO DO BIEU DO": (
             "DANH MUC HINH SO DO BIEU DO"
         ),
@@ -1598,6 +2022,13 @@ def _canonical_structure_key(text):
         ),
         "DAT VAN DE": "DAT VAN DE",
         "INTRODUCTION": "DAT VAN DE",
+        "MUC TIEU": "MUC TIEU NGHIEN CUU",
+        "MUC TIEU NGHIEN CUU": "MUC TIEU NGHIEN CUU",
+        "OBJECTIVES": "MUC TIEU NGHIEN CUU",
+        "CAU HOI NGHIEN CUU": "CAU HOI NGHIEN CUU",
+        "RESEARCH QUESTIONS": "CAU HOI NGHIEN CUU",
+        "GIA THUYET NGHIEN CUU": "GIA THUYET NGHIEN CUU",
+        "RESEARCH HYPOTHESES": "GIA THUYET NGHIEN CUU",
         "TONG QUAN": "TONG QUAN",
         "TONG QUAN TAI LIEU": "TONG QUAN",
         "DOI TUONG VA PHUONG PHAP NGHIEN CUU": (
@@ -1616,6 +2047,17 @@ def _canonical_structure_key(text):
         "BAN LUAN KET QUA": "BAN LUAN",
         "BAN LUAN KET QUA NGHIEN CUU": "BAN LUAN",
         "DISCUSSION": "BAN LUAN",
+        "DU KIEN KET QUA": "DU KIEN KET QUA",
+        "KET QUA DU KIEN": "DU KIEN KET QUA",
+        "EXPECTED RESULTS": "DU KIEN KET QUA",
+        "DU KIEN BAN LUAN": "DU KIEN BAN LUAN",
+        "KE HOACH NGHIEN CUU": "KE HOACH NGHIEN CUU",
+        "KE HOACH THUC HIEN": "KE HOACH NGHIEN CUU",
+        "TIEN DO THUC HIEN": "TIEN DO THUC HIEN",
+        "TIEN DO NGHIEN CUU": "TIEN DO THUC HIEN",
+        "DU TRU KINH PHI": "DU TRU KINH PHI",
+        "KINH PHI NGHIEN CUU": "DU TRU KINH PHI",
+        "SAN PHAM DU KIEN": "SAN PHAM DU KIEN",
         "KET LUAN": "KET LUAN",
         "KIEN NGHI": "KIEN NGHI",
         "TAI LIEU THAM KHAO": "TAI LIEU THAM KHAO",
@@ -1626,24 +2068,88 @@ def _canonical_structure_key(text):
     return exact_aliases.get(normalized)
 
 
-def _extract_structure_headings(doc):
+def _paragraph_style_name(paragraph):
+    try:
+        return paragraph.style.name if paragraph.style else ""
+    except Exception:
+        return ""
+
+
+def _is_toc_paragraph(paragraph):
+    normalized_style = _normalize_heading(_paragraph_style_name(paragraph))
+    return normalized_style.startswith(
+        ("TOC", "MUC LUC", "CONTENTS", "TABLE OF CONTENTS")
+    )
+
+
+def _custom_structure_key(text):
+    normalized = _normalize_heading(text)
+    return f"CUSTOM::{normalized}" if normalized else None
+
+
+def _structure_label(key):
+    if key.startswith("CUSTOM::"):
+        return key.split("::", 1)[1].title()
+    return STRUCTURE_LABELS.get(key, key)
+
+
+def _is_template_top_level_heading(paragraph):
+    """Nhận tiêu đề cấp 1 riêng có trong template của người dùng.
+
+    Các mục chuẩn vẫn nhận theo từ khóa. Với mục đặc thù chưa có trong danh
+    sách (ví dụ một mục riêng của đề cương), chỉ lấy Heading 1 để tránh đưa
+    toàn bộ tiểu mục 1.1, 1.2 vào kiểm tra cấu trúc lớn.
+    """
+    text = paragraph.text.strip()
+    normalized_text = _normalize_heading(text)
+    if (
+        not normalized_text
+        or normalized_text.startswith(("NGUON", "SOURCE"))
+        or _paragraph_is_image_caption(paragraph)
+        or re.fullmatch(r"[.\-–—_…\s]+", text)
+    ):
+        return False
+    style = _normalize_heading(_paragraph_style_name(paragraph))
+    return bool(
+        re.fullmatch(r"(?:HEADING|TIEU DE)\s*1", style)
+        or style in {"CHAPTER TITLE", "TEN CHUONG"}
+    )
+
+
+def _extract_structure_headings(doc, expected_keys=None):
     headings = []
+    expected_custom = {
+        key for key in (expected_keys or []) if key.startswith("CUSTOM::")
+    }
     for paragraph in list(_all_document_paragraphs(doc)):
-        try:
-            style_name = paragraph.style.name if paragraph.style else ""
-        except Exception:
-            style_name = ""
-        normalized_style = _normalize_heading(style_name)
         # Không lấy các dòng trong Mục lục làm chương thật. Số trang của
         # trường TOC đôi khi không xuất hiện trong paragraph.text, khiến
         # "TÀI LIỆU THAM KHẢO" ở mục lục bị nhận nhầm là phần cuối luận văn.
-        if normalized_style.startswith(
-            ("TOC", "MUC LUC", "CONTENTS", "TABLE OF CONTENTS")
-        ):
+        if _is_toc_paragraph(paragraph):
             continue
         key = _canonical_structure_key(paragraph.text)
+        if key is None and expected_custom:
+            candidate = _custom_structure_key(paragraph.text)
+            if candidate in expected_custom:
+                key = candidate
         if key:
             headings.append((key, paragraph))
+    return headings
+
+
+def _extract_template_structure_headings(template_doc):
+    headings = []
+    seen = set()
+    for paragraph in list(_all_document_paragraphs(template_doc)):
+        if _is_toc_paragraph(paragraph):
+            continue
+        key = _canonical_structure_key(paragraph.text)
+        if key is None and _is_template_top_level_heading(paragraph):
+            key = _custom_structure_key(paragraph.text)
+        if not key or key == "MERGED_RESULTS_DISCUSSION" or key in seen:
+            continue
+        seen.add(key)
+        headings.append((key, paragraph))
     return headings
 
 
@@ -1673,6 +2179,7 @@ def _clear_old_structure_highlight(paragraph):
 
 
 def _template_structure(template_path=None, template_bytes=None):
+    template_requested = bool(template_bytes or template_path)
     try:
         if template_bytes:
             template_doc = docx.Document(io.BytesIO(template_bytes))
@@ -1683,16 +2190,20 @@ def _template_structure(template_path=None, template_bytes=None):
 
         if template_doc is not None:
             keys = []
-            for key, _ in _extract_structure_headings(template_doc):
-                if (
-                    key != "MERGED_RESULTS_DISCUSSION"
-                    and key not in keys
-                ):
+            for key, _ in _extract_template_structure_headings(template_doc):
+                if key not in keys:
                     keys.append(key)
-            if len(keys) >= 4:
+            if len(keys) >= 2:
                 return keys
-    except Exception:
-        pass
+            raise ValueError(
+                "Template không có đủ tiêu đề cấp 1 để đối chiếu cấu trúc. "
+                "Hãy đặt Style Heading 1 cho các mục/chương chính."
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        if template_requested:
+            raise ValueError(f"Không thể đọc cấu trúc template: {exc}") from exc
     return list(FALLBACK_STRUCTURE)
 
 
@@ -1721,7 +2232,10 @@ def check_structure_against_template(
     expected_positions = {
         key: index for index, key in enumerate(expected_keys)
     }
-    actual_headings = _extract_structure_headings(doc)
+    actual_headings = _extract_structure_headings(
+        doc,
+        expected_keys=expected_keys,
+    )
     if removed_warning_count:
         # Các tiêu đề từng bị báo sai đã được bôi vàng ở lần chạy trước.
         # Xóa màu cũ trước, sau đó chỉ bôi lại nếu lần kiểm tra mới vẫn sai.
@@ -1780,7 +2294,7 @@ def check_structure_against_template(
             out_of_order_count += 1
             _highlight_structure_paragraph(paragraph)
             warning = (
-                f"Mục {STRUCTURE_LABELS.get(key, key)} đang sai "
+                f"Mục {_structure_label(key)} đang sai "
                 "thứ tự so với file template."
             )
             if warning not in existing_warning_text:
@@ -1805,7 +2319,7 @@ def check_structure_against_template(
 
     if missing_keys:
         missing_labels = ", ".join(
-            STRUCTURE_LABELS.get(key, key) for key in missing_keys
+            _structure_label(key) for key in missing_keys
         )
         warning = (
             "Thiếu các chương/mục theo template: "
@@ -1850,7 +2364,7 @@ def check_structure_against_template(
         detailed_errors.append(
             "🟨 **Cấu trúc theo template:** Thiếu "
             + ", ".join(
-                STRUCTURE_LABELS.get(key, key)
+                _structure_label(key)
                 for key in missing_keys
             )
             + "; đã chèn cảnh báo bôi vàng."
@@ -2053,6 +2567,8 @@ def mark_abbreviations_and_subjectless_sentences(
     doc,
     cover_p_elements,
     detailed_errors,
+    check_abbreviations=True,
+    check_subjectless_sentences=True,
 ):
     abbreviation_counts = Counter()
     subjectless_count = 0
@@ -2076,7 +2592,7 @@ def mark_abbreviations_and_subjectless_sentences(
             continue
 
         abbreviation_ranges = []
-        if not _is_all_caps_heading(text):
+        if check_abbreviations and not _is_all_caps_heading(text):
             abbreviation_ranges, abbreviations = (
                 _find_abbreviation_ranges(paragraph.text)
             )
@@ -2084,6 +2600,8 @@ def mark_abbreviations_and_subjectless_sentences(
 
         subjectless_ranges = []
         if (
+            check_subjectless_sentences
+            and
             not _is_heading_like(paragraph)
             and not _paragraph_is_image_caption(paragraph)
             and not _paragraph_is_in_table(paragraph)
@@ -2158,6 +2676,8 @@ def process_docx_file(
     rules,
     template_path=None,
     template_bytes=None,
+    profile_label=None,
+    regulation_filename=None,
 ):
     doc = docx.Document(io.BytesIO(uploaded_bytes))
     font_target = rules["font_name"]
@@ -2166,8 +2686,10 @@ def process_docx_file(
         float(value)
         for value in rules.get("allowed_font_sizes", [13.0, 14.0])
     }
+    if not allowed_font_sizes:
+        allowed_font_sizes = {size_target}
     if size_target not in allowed_font_sizes:
-        size_target = 13.0
+        size_target = sorted(allowed_font_sizes)[0]
     line_target = float(rules["line_spacing"])
     target_left = float(rules["margin_left"])
     target_right = float(rules["margin_right"])
@@ -2175,6 +2697,11 @@ def process_docx_file(
     target_bottom = float(rules["margin_bottom"])
 
     detailed_errors = []
+    if profile_label:
+        source_text = f"; quy định: {regulation_filename}" if regulation_filename else ""
+        detailed_errors.append(
+            f"📘 **Hồ sơ được chọn:** {profile_label}{source_text}."
+        )
     check_structure_against_template(
         doc,
         template_path,
@@ -2239,6 +2766,10 @@ def process_docx_file(
     action_counts = Counter()
     paragraphs = doc.paragraphs
     in_references = False
+    citation_style = str(
+        rules.get("citation_style", "numeric_superscript")
+    ).strip().lower()
+    normalize_references = bool(rules.get("normalize_references", True))
 
     for index, paragraph in enumerate(paragraphs):
         if clean_spaces_and_punctuation(paragraph):
@@ -2253,13 +2784,22 @@ def process_docx_file(
             in_references = False
 
         if paragraph._element not in cover_p_elements:
-            actions = fix_author_citations(
-                paragraph,
-                in_references_section=in_references,
+            # Luôn nhận diện các trích dẫn tác giả-năm trong nội dung, kể cả
+            # khi bộ quy định ưu tiên trích dẫn số. Nhờ vậy các trường hợp
+            # "tác giả (năm)" và "Năm ... tác giả" vẫn được chuẩn hóa đúng.
+            should_fix_author_citations = (
+                (in_references and normalize_references)
+                or not in_references
             )
-            action_counts.update(actions)
+            actions = []
+            if should_fix_author_citations:
+                actions = fix_author_citations(
+                    paragraph,
+                    in_references_section=in_references,
+                )
+                action_counts.update(actions)
 
-            if not in_references:
+            if not in_references and citation_style == "numeric_superscript":
                 citation_result = normalize_numeric_citations(
                     paragraph,
                     font_target,
@@ -2276,11 +2816,17 @@ def process_docx_file(
         cover_p_elements,
         detailed_errors,
         font_target,
+        require_source=bool(rules.get("require_image_source", True)),
+        require_caption=bool(rules.get("require_image_caption", True)),
     )
     mark_abbreviations_and_subjectless_sentences(
         doc,
         cover_p_elements,
         detailed_errors,
+        check_abbreviations=bool(rules.get("check_abbreviations", True)),
+        check_subjectless_sentences=bool(
+            rules.get("check_subjectless_sentences", True)
+        ),
     )
 
     if title_bold_count:
@@ -2306,8 +2852,9 @@ def process_docx_file(
         )
     if action_counts["author_missing_year"]:
         detailed_errors.append(
-            "🟥 **Trích dẫn chỉ có tên tác giả:** Cần bổ sung năm; "
-            f"đã bôi đỏ {action_counts['author_missing_year']} vị trí."
+            "🟨 **Trích dẫn có tác giả và cộng sự nhưng thiếu năm:** "
+            "Cần bổ sung năm; đã bôi vàng toàn bộ cụm trích dẫn tại "
+            f"{action_counts['author_missing_year']} vị trí."
         )
     if action_counts["reference_added_et_al"]:
         detailed_errors.append(
@@ -2399,11 +2946,12 @@ def process_docx_file(
                     if paragraph._element in cover_p_elements:
                         continue
                     clean_spaces_and_punctuation(paragraph)
-                    normalize_numeric_citations(
-                        paragraph,
-                        font_target,
-                        size_target,
-                    )
+                    if citation_style == "numeric_superscript":
+                        normalize_numeric_citations(
+                            paragraph,
+                            font_target,
+                            size_target,
+                        )
                     paragraph.paragraph_format.line_spacing = line_target
                     for run in paragraph.runs:
                         if run._element in legacy_run_elements:
@@ -2420,10 +2968,13 @@ def process_docx_file(
                                 font_size_corrected_count += 1
 
     if font_size_corrected_count:
+        allowed_sizes_text = ", ".join(
+            f"{value:g}" for value in sorted(allowed_font_sizes)
+        )
         detailed_errors.append(
-            "🔤 **Font và cỡ chữ:** Đã dùng Times New Roman; giữ nguyên "
-            "các chữ cỡ 13 hoặc 14 và đưa "
-            f"{font_size_corrected_count} đoạn chữ ngoài hai cỡ này về "
+            f"🔤 **Font và cỡ chữ:** Đã dùng {font_target}; giữ nguyên "
+            f"các cỡ chữ được quy định ({allowed_sizes_text} pt) và đưa "
+            f"{font_size_corrected_count} đoạn chữ ngoài các cỡ này về "
             f"{size_target:g} pt."
         )
 
@@ -2466,12 +3017,11 @@ def main():
               </p>
               <h1 style="font-size:28px;font-weight:700;color:#ad171c;
                          margin:2px 0 8px 0;">
-                Trung tâm Khảo thí & ĐBCLGD — Bộ môn Mắt -
-                Khúc xạ nhãn khoa
+                Trung tâm Khảo thí & ĐBCLGD
               </h1>
               <h3 style="font-size:18px;font-weight:500;color:#333;
                          margin:0;">
-                🔬 Hệ thống Kiểm tra và Sửa định dạng Luận văn tự động
+                🔬 Hệ thống Kiểm tra Luận văn và Đề cương tự động
               </h3>
             </div>
             """,
@@ -2490,203 +3040,174 @@ def main():
     except Exception:
         api_key = os.environ.get("GEMINI_API_KEY", "")
 
-    col_main, col_side = st.columns([2, 1])
-    del col_side
     app_directory = os.path.dirname(os.path.abspath(__file__))
-    template_path = os.path.join(
-        app_directory,
-        "template",
-        "template.docx",
+    st.subheader("1. Chọn loại hồ sơ cần kiểm tra")
+    profile_key = st.selectbox(
+        "Loại hồ sơ",
+        options=list(DOCUMENT_PROFILES),
+        format_func=lambda key: DOCUMENT_PROFILES[key]["label"],
+        help=(
+            "Mỗi lựa chọn được gắn cố định với một template Word và một "
+            "file quy định PDF tương ứng."
+        ),
     )
-    with col_main:
-        st.subheader("1. Chọn File Quy Định Trình Bày (.PDF)")
-        pdf_folder = "quy_dinh"
-        pdf_files = (
-            [
-                name
-                for name in os.listdir(pdf_folder)
-                if name.lower().endswith(".pdf")
-            ]
-            if os.path.exists(pdf_folder)
-            else []
+    profile = resolve_profile_paths(
+        app_directory,
+        DOCUMENT_PROFILES[profile_key],
+    )
+    template_path = profile["template_path"]
+    regulation_path = profile["regulation_path"]
+
+    template_exists = os.path.isfile(template_path)
+    regulation_exists = os.path.isfile(regulation_path)
+    parsed_rules = _copy_default_rules()
+    pdf_text = ""
+
+    if regulation_exists:
+        pdf_text, parsed_rules = load_rules_for_pdf(
+            regulation_path,
+            os.path.getmtime(regulation_path),
+            api_key,
         )
-        selected_pdf = (
-            st.selectbox(
-                "Chọn file quy định PDF trong thư mục quy_dinh:",
-                pdf_files,
+
+    left_status, right_status = st.columns(2)
+    with left_status:
+        if template_exists:
+            st.success(
+                f"✅ Template: {profile['resolved_template_file']}"
             )
-            if pdf_files
-            else None
-        )
+        else:
+            st.error(f"❌ Thiếu template: {profile['template_file']}")
+    with right_status:
+        if regulation_exists and pdf_text:
+            st.success(
+                f"✅ Quy định: {profile['resolved_regulation_file']}"
+            )
+        elif regulation_exists:
+            st.error("❌ PDF quy định không có lớp chữ để đọc.")
+        else:
+            st.error(f"❌ Thiếu quy định: {profile['regulation_file']}")
 
-        parsed_rules = dict(DEFAULT_RULES)
-        parsed_rules["detailed_requirements"] = []
-        if selected_pdf:
-            pdf_path = os.path.join(pdf_folder, selected_pdf)
-            pdf_text = extract_raw_text_from_pdf(pdf_path)
-            if pdf_text:
-                parsed_rules = analyze_rules_with_gemini(
-                    pdf_text,
-                    api_key,
-                )
-                st.success(
-                    f"✅ Đã đọc thành công nội dung file {selected_pdf}!"
-                )
-                with st.expander(
-                    "📌 Báo cáo quy định đã trích xuất từ PDF"
-                ):
-                    st.markdown(
-                        f"**Font:** {parsed_rules.get('font_name')} | "
-                        f"**Cỡ:** {parsed_rules.get('font_size')} pt | "
-                        f"**Giãn dòng:** "
-                        f"{parsed_rules.get('line_spacing')}"
-                    )
-                    st.markdown(
-                        "**Lề trái-phải-trên-dưới:** "
-                        f"{parsed_rules.get('margin_left')} - "
-                        f"{parsed_rules.get('margin_right')} - "
-                        f"{parsed_rules.get('margin_top')} - "
-                        f"{parsed_rules.get('margin_bottom')} cm"
-                    )
-                    for requirement in parsed_rules.get(
-                        "detailed_requirements",
-                        [],
-                    ):
-                        st.markdown(f"* {requirement}")
-            else:
-                st.warning(
-                    "⚠️ PDF có thể là bản scan. Bạn hãy chỉnh thông số "
-                    "ở thanh bên phải."
-                )
+    if regulation_exists and pdf_text:
+        with st.expander("📌 Quy định đang được áp dụng", expanded=False):
+            allowed_sizes = parsed_rules.get(
+                "allowed_font_sizes",
+                [parsed_rules.get("font_size", 13.0)],
+            )
+            allowed_sizes_text = ", ".join(
+                f"{float(value):g}" for value in allowed_sizes
+            )
+            st.markdown(
+                f"**Font:** {parsed_rules.get('font_name')} | "
+                f"**Cỡ:** {allowed_sizes_text} pt | "
+                f"**Giãn dòng:** {parsed_rules.get('line_spacing')}"
+            )
+            st.markdown(
+                "**Lề trái – phải – trên – dưới:** "
+                f"{parsed_rules.get('margin_left')} – "
+                f"{parsed_rules.get('margin_right')} – "
+                f"{parsed_rules.get('margin_top')} – "
+                f"{parsed_rules.get('margin_bottom')} cm"
+            )
+            st.markdown(
+                f"**Kiểu trích dẫn:** "
+                f"{parsed_rules.get('citation_style', 'keep')}"
+            )
+            for requirement in parsed_rules.get(
+                "detailed_requirements",
+                [],
+            ):
+                st.markdown(f"- {requirement}")
 
-        st.subheader("2. Tải File Luận Văn Của Học Viên (.DOCX)")
-        st.caption(
-            "Cấu trúc luận văn được tự động đối chiếu với template "
-            "chuẩn đã tích hợp trong hệ thống."
-        )
-        uploaded_docx = st.file_uploader(
-            "Thả file .docx luận văn vào đây",
-            type=["docx"],
-            key="uploaded_thesis",
-        )
+    st.subheader("2. Tải file Word của học viên")
+    st.caption(
+        "Hệ thống tự đối chiếu cấu trúc với đúng template và định dạng "
+        "với đúng PDF quy định của loại hồ sơ đã chọn."
+    )
+    uploaded_docx = st.file_uploader(
+        "Thả file .docx vào đây",
+        type=["docx"],
+        key=f"uploaded_document_{profile_key}",
+    )
 
-    st.sidebar.title("📄 Tải Template Mẫu")
-    if os.path.exists(template_path):
+    st.sidebar.title("📄 Template mẫu đang chọn")
+    st.sidebar.info(profile["label"])
+    if template_exists:
         with open(template_path, "rb") as template_file:
             bundled_template_bytes = template_file.read()
         st.sidebar.download_button(
-            label="📥 TẢI TEMPLATE WORD MẪU (.DOCX)",
+            label="📥 TẢI ĐÚNG TEMPLATE WORD MẪU",
             data=bundled_template_bytes,
-            file_name="template.docx",
+            file_name=profile["resolved_template_file"],
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "wordprocessingml.document"
             ),
             use_container_width=True,
         )
-        st.sidebar.caption(
-            "👉 Tải file mẫu về để điền nội dung đúng định dạng."
-        )
     else:
-        st.sidebar.info(
-            "ℹ️ Không tìm thấy template.docx trong thư mục template."
-        )
+        st.sidebar.error("Template của loại hồ sơ này chưa được cài đặt.")
 
     st.sidebar.markdown("---")
-    st.sidebar.title("⚙️ Bảng Quy Định Định Dạng")
-    final_font = st.sidebar.text_input(
-        "Font chữ thân bài",
-        value=parsed_rules.get("font_name", "Times New Roman"),
+    st.sidebar.title("⚙️ Cặp tệp hệ thống")
+    st.sidebar.markdown(
+        f"**Template:** `{profile['resolved_template_file']}`"
     )
-    parsed_size = float(parsed_rules.get("font_size", 13.0))
-    final_size = st.sidebar.selectbox(
-        "Cỡ chữ chuẩn (chấp nhận 13 hoặc 14 pt)",
-        options=[13.0, 14.0],
-        index=1 if parsed_size == 14.0 else 0,
+    st.sidebar.markdown(
+        f"**Quy định:** `{profile['resolved_regulation_file']}`"
     )
-    final_spacing = st.sidebar.number_input(
-        "Giãn dòng",
-        value=float(parsed_rules.get("line_spacing", 1.5)),
-        step=0.1,
+    st.sidebar.caption(
+        "Học viên không thể thay đổi cặp tệp này. Quản trị viên cập nhật "
+        "tệp trong thư mục template và quy_dinh."
     )
-    st.sidebar.subheader("📐 Căn Lề Trang (cm)")
-    final_left = st.sidebar.number_input(
-        "Lề trái",
-        value=float(parsed_rules.get("margin_left", 3.5)),
-        step=0.5,
-    )
-    final_right = st.sidebar.number_input(
-        "Lề phải",
-        value=float(parsed_rules.get("margin_right", 2.0)),
-        step=0.5,
-    )
-    final_top = st.sidebar.number_input(
-        "Lề trên",
-        value=float(parsed_rules.get("margin_top", 3.5)),
-        step=0.5,
-    )
-    final_bottom = st.sidebar.number_input(
-        "Lề dưới",
-        value=float(parsed_rules.get("margin_bottom", 3.0)),
-        step=0.5,
-    )
-    active_rules = {
-        "font_name": final_font,
-        "font_size": final_size,
-        "allowed_font_sizes": [13.0, 14.0],
-        "line_spacing": final_spacing,
-        "margin_left": final_left,
-        "margin_right": final_right,
-        "margin_top": final_top,
-        "margin_bottom": final_bottom,
-    }
 
-    with col_main:
-        st.markdown("---")
-        if st.button(
-            "🔍 KIỂM TRA ĐỊNH DẠNG",
-            type="primary",
-            use_container_width=True,
-        ):
-            if not os.path.exists(template_path):
-                st.error(
-                    "❌ Hệ thống chưa tìm thấy template chuẩn. "
-                    "Vui lòng liên hệ quản trị viên."
-                )
-            elif not uploaded_docx:
-                st.error(
-                    "❌ Vui lòng tải file luận văn (.docx) ở bước 2."
-                )
-            else:
+    active_rules = copy.deepcopy(parsed_rules)
+    profile_ready = template_exists and regulation_exists and bool(pdf_text)
+
+    st.markdown("---")
+    if st.button(
+        "🔍 KIỂM TRA THEO ĐÚNG LOẠI HỒ SƠ",
+        type="primary",
+        use_container_width=True,
+    ):
+        if not profile_ready:
+            st.error(
+                "❌ Chưa thể kiểm tra vì cặp template/quy định của loại "
+                "hồ sơ này chưa đầy đủ hoặc PDF chưa đọc được. Vui lòng "
+                "liên hệ quản trị viên."
+            )
+        elif not uploaded_docx:
+            st.error("❌ Vui lòng tải file Word (.docx) ở bước 2.")
+        else:
+            try:
                 with st.spinner(
-                    "⏳ Đang bảo toàn bìa, sửa lỗi và đánh dấu màu..."
+                    "⏳ Đang đối chiếu template, quy định và đánh dấu màu..."
                 ):
                     fixed_stream, error_list = process_docx_file(
                         uploaded_docx.getvalue(),
                         active_rules,
                         template_path=template_path,
+                        profile_label=profile["label"],
+                        regulation_filename=(
+                            profile["resolved_regulation_file"]
+                        ),
                     )
+            except Exception as exc:
+                st.error(f"❌ Không thể xử lý file Word: {exc}")
+            else:
                 st.markdown(
                     "### 📋 BÁO CÁO KẾT QUẢ KIỂM TRA VÀ SỬA LỖI"
                 )
-                if error_list:
-                    for error in error_list:
-                        st.write(error)
-                    st.success(
-                        "🎉 Đã hoàn thành. Các vị trí cần lưu ý đã "
-                        "được bôi vàng hoặc đỏ trong file Word."
-                    )
-                else:
-                    st.success("🎉 File luận văn đã đạt chuẩn.")
+                for error in error_list:
+                    st.write(error)
+                st.success(
+                    "🎉 Đã hoàn thành. Các vị trí cần rà soát được bôi "
+                    "vàng hoặc đỏ trong file Word."
+                )
                 st.download_button(
-                    label=(
-                        "📥 TẢI FILE LUẬN VĂN ĐÃ CHUẨN HÓA "
-                        "VÀ HIGHLIGHT"
-                    ),
+                    label="📥 TẢI FILE ĐÃ KIỂM TRA VÀ HIGHLIGHT",
                     data=fixed_stream,
-                    file_name=(
-                        "LuanVan_DaiHocYHaNoi_DaChuanHoa.docx"
-                    ),
+                    file_name=profile["output_file"],
                     mime=(
                         "application/vnd.openxmlformats-officedocument."
                         "wordprocessingml.document"
