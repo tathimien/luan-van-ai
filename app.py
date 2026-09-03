@@ -3015,13 +3015,13 @@ def main():
                         margin:0;text-transform:uppercase;">
                 Trường Đại học Y Hà Nội
               </p>
-              <h1 style="font-size:28px;font-weight:700;color:#ad171c;
-                         margin:2px 0 2px 0;">
-                Bộ môn Mắt - Khúc xạ nhãn khoa
-              </h1>
-              <h2 style="font-size:23px;font-weight:700;color:#ad171c;
-                         margin:0 0 8px 0;">
+              <h2 style="font-size:24px;font-weight:700;color:#ad171c;
+                         margin:2px 0;">
                 Trung tâm Khảo thí & ĐBCLGD
+              </h2>
+              <h2 style="font-size:24px;font-weight:700;color:#ad171c;
+                         margin:2px 0 8px 0;">
+                Bộ môn Mắt - Khúc xạ nhãn khoa
               </h2>
               <h3 style="font-size:18px;font-weight:500;color:#333;
                          margin:0;">
