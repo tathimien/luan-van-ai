@@ -929,11 +929,13 @@ def _highlight_superscript_record(record):
 
 def normalize_numeric_citations(paragraph, font_target, size_target):
     """
-    Chuyển [1], [1-3], [1, 2] thành số lũy thừa và đặt số sau dấu chấm.
+    Chuẩn hóa trích dẫn số thành lũy thừa và đặt sau dấu chấm.
 
     Ví dụ:
         Nội dung [1].  -> Nội dung.¹
         Nội dung. [2] -> Nội dung.²
+        Nội dung¹,².  -> Nội dung.¹,²
+        Nội dung¹,²   -> Nội dung.¹,²
     """
     text = paragraph.text
     records = _paragraph_char_records(paragraph)
@@ -1100,6 +1102,50 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
             )
             index = next_index + 1
             moved_count += 1
+        elif has_digit and next_index >= len(records):
+            # Học viên đã đặt số ở dạng lũy thừa nhưng quên dấu chấm,
+            # ví dụ "Nội dung¹,²". Thêm dấu chấm trước cụm trích dẫn,
+            # không đặt dấu chấm sau số lũy thừa.
+            previous_nonspace = len(normalized) - 1
+            while (
+                previous_nonspace >= 0
+                and normalized[previous_nonspace][0].isspace()
+            ):
+                previous_nonspace -= 1
+            already_after_punctuation = (
+                previous_nonspace >= 0
+                and normalized[previous_nonspace][0]
+                in SENTENCE_PUNCTUATION
+            )
+            if not already_after_punctuation:
+                while normalized and normalized[-1][0].isspace():
+                    normalized.pop()
+                base_style = (
+                    normalized[-1][1]
+                    if normalized
+                    else records[index][1]
+                )
+                normalized.append(
+                    (
+                        ".",
+                        _style_with(
+                            base_style,
+                            superscript=False,
+                            subscript=False,
+                            highlight=WD_COLOR_INDEX.YELLOW,
+                        ),
+                    )
+                )
+                normalized.extend(
+                    _highlight_superscript_record(record)
+                    for record in records[index:end_index]
+                    if not record[0].isspace()
+                )
+                index = next_index
+                moved_count += 1
+            else:
+                normalized.extend(records[index:end_index])
+                index = end_index
         else:
             normalized.extend(records[index:end_index])
             index = end_index
@@ -2870,7 +2916,10 @@ def process_docx_file(
                     font_target,
                     size_target,
                 )
-                if citation_result["changed"]:
+                # Chỉ đếm mục này khi thực sự chuyển từ ngoặc vuông;
+                # trường hợp số vốn đã là lũy thừa nhưng đặt sai vị trí
+                # được báo riêng ở citation_moved_count bên dưới.
+                if citation_result["converted"]:
                     citation_paragraph_count += 1
                 citation_moved_count += citation_result[
                     "moved_after_period"
