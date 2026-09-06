@@ -832,7 +832,7 @@ def fix_ethics_section(doc):
 def enforce_bold_for_thesis_title(paragraph):
     text_lower = paragraph.text.lower().strip()
     is_title = (
-        "tên đề tài" in text_lower
+        text_lower == "tên đề tài"
         or text_lower.startswith("đề tài:")
         or text_lower.startswith("đề tài :")
     )
@@ -842,6 +842,138 @@ def enforce_bold_for_thesis_title(paragraph):
             run.font.highlight_color = WD_COLOR_INDEX.YELLOW
         return True
     return False
+
+
+GOAL_COUNT_WORDS = {
+    1: "một",
+    2: "hai",
+    3: "ba",
+    4: "bốn",
+    5: "năm",
+    6: "sáu",
+    7: "bảy",
+    8: "tám",
+    9: "chín",
+    10: "mười",
+}
+GOAL_COUNT_PATTERN = re.compile(
+    r"(?<!\d)(?P<number>0?[1-9]|10)\s+(?P<label>mục\s+tiêu)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_goal_count_in_introduction(paragraph):
+    """Đổi ``2 mục tiêu`` thành ``hai mục tiêu`` trong Đặt vấn đề."""
+    original_text = paragraph.text
+    if not original_text or not GOAL_COUNT_PATTERN.search(original_text):
+        return 0
+
+    replacement_count = 0
+
+    def replace_match(match):
+        nonlocal replacement_count
+        number = int(match.group("number"))
+        word = GOAL_COUNT_WORDS.get(number)
+        if not word:
+            return match.group(0)
+
+        previous_text = original_text[: match.start()].rstrip()
+        if not previous_text or previous_text.endswith((".", "!", "?", ":")):
+            word = word.capitalize()
+        replacement_count += 1
+        return f"{word} {match.group('label')}"
+
+    normalized_text = GOAL_COUNT_PATTERN.sub(replace_match, original_text)
+    if replacement_count:
+        set_paragraph_text_preserve_formatting(
+            paragraph,
+            normalized_text,
+            highlight_changes=True,
+        )
+    return replacement_count
+
+
+def _introduction_title_range(paragraph, previous_nonempty_text=""):
+    """Tìm đúng khoảng tên đề tài trong câu kết phần Đặt vấn đề."""
+    text = paragraph.text
+    if not text.strip():
+        return None
+
+    # Dạng chuẩn của template: đề tài "Tên đề tài" nhằm/với hai mục tiêu.
+    quoted_match = re.search(
+        r"[\"“](?P<title>[^\"”]{3,500})[\"”]"
+        r"(?=\s*(?:nhằm|với)\b[^.!?]{0,100}\bmục\s+tiêu\b)",
+        text,
+        re.IGNORECASE,
+    )
+    if quoted_match:
+        return quoted_match.span("title")
+
+    # Tên đề tài và câu dẫn cùng một đoạn nhưng học viên không dùng ngoặc kép.
+    inline_match = re.search(
+        r"\b(?:thực\s+hiện|tiến\s+hành|nghiên\s+cứu)\s+"
+        r"(?:nghiên\s+cứu\s+)?đề\s+tài\s*:?\s*"
+        r"(?P<title>.{3,500}?)"
+        r"(?=\s+(?:nhằm|với)\s+[^.!?]{0,100}\bmục\s+tiêu\b)",
+        text,
+        re.IGNORECASE,
+    )
+    if inline_match:
+        start, end = inline_match.span("title")
+        while start < end and text[start] in " \t\"“":
+            start += 1
+        while end > start and text[end - 1] in " \t\"”":
+            end -= 1
+        return (start, end) if end > start else None
+
+    # Dạng tách đoạn: đoạn trước kết thúc bằng "đề tài:", đoạn sau là
+    # tên đề tài rồi mới đến "với/nhằm ... mục tiêu".
+    if re.search(r"\bđề\s+tài\s*:\s*$", previous_nonempty_text, re.IGNORECASE):
+        goal_marker = re.search(
+            r"\s+(?:nhằm|với)\s+[^.!?]{0,100}\bmục\s+tiêu\b",
+            text,
+            re.IGNORECASE,
+        )
+        if goal_marker:
+            start = len(text) - len(text.lstrip(" \t\"“"))
+            end = goal_marker.start()
+            while end > start and text[end - 1] in " \t\"”":
+                end -= 1
+            return (start, end) if end > start else None
+
+        stripped = text.strip(" \t\"“”")
+        if 3 <= len(stripped) <= 500:
+            start = text.find(stripped)
+            return start, start + len(stripped)
+    return None
+
+
+def bold_introduction_thesis_title(paragraph, previous_nonempty_text=""):
+    """In đậm riêng tên đề tài theo template, bôi vàng nếu có sửa."""
+    title_range = _introduction_title_range(
+        paragraph,
+        previous_nonempty_text,
+    )
+    if not title_range:
+        return False
+
+    records = _paragraph_char_records(paragraph)
+    if not records:
+        return False
+    start, end = title_range
+    changed = False
+    for index in range(max(0, start), min(end, len(records))):
+        char, style = records[index]
+        if style[0]:
+            continue
+        values = list(style)
+        values[0] = True
+        values[6] = WD_COLOR_INDEX.YELLOW
+        records[index] = (char, tuple(values))
+        changed = True
+    if changed:
+        _rebuild_paragraph(paragraph, records)
+    return changed
 
 
 def _style_from_run(run):
@@ -3058,6 +3190,8 @@ def process_docx_file(
 
     spacing_count = 0
     title_bold_count = 0
+    introduction_title_bold_count = 0
+    goal_count_word_count = 0
     citation_paragraph_count = 0
     citation_moved_count = 0
     action_counts = Counter()
@@ -3066,6 +3200,8 @@ def process_docx_file(
     # vòng riêng nên số liệu báo cáo và một số thao tác không đồng nhất.
     paragraphs = list(_all_document_paragraphs(doc))
     in_references = False
+    in_introduction = False
+    last_introduction_nonempty_text = ""
     citation_style = str(
         rules.get("citation_style", "numeric_superscript")
     ).strip().lower()
@@ -3074,7 +3210,41 @@ def process_docx_file(
     for index, paragraph in enumerate(paragraphs):
         if clean_spaces_and_punctuation(paragraph):
             spacing_count += 1
-        if enforce_bold_for_thesis_title(paragraph):
+
+        is_toc_entry = _is_toc_paragraph(paragraph)
+        is_generated_warning = bool(
+            STRUCTURE_WARNING_PARAGRAPH_PATTERN.search(paragraph.text)
+            or IMAGE_WARNING_PARAGRAPH_PATTERN.search(paragraph.text)
+        )
+        structure_key = (
+            None
+            if is_toc_entry or is_generated_warning
+            else _canonical_structure_key(paragraph.text)
+        )
+        if structure_key == "DAT VAN DE":
+            in_introduction = True
+            last_introduction_nonempty_text = ""
+        elif in_introduction and structure_key in {
+            "TONG QUAN",
+            "DOI TUONG VA PHUONG PHAP NGHIEN CUU",
+            "DU KIEN KET QUA",
+            "KET QUA",
+        }:
+            in_introduction = False
+            last_introduction_nonempty_text = ""
+
+        if in_introduction and structure_key != "DAT VAN DE":
+            goal_count_word_count += normalize_goal_count_in_introduction(
+                paragraph
+            )
+            if bold_introduction_thesis_title(
+                paragraph,
+                last_introduction_nonempty_text,
+            ):
+                introduction_title_bold_count += 1
+            if paragraph.text.strip():
+                last_introduction_nonempty_text = paragraph.text.strip()
+        elif enforce_bold_for_thesis_title(paragraph):
             title_bold_count += 1
 
         if _is_actual_references_heading(paragraph):
@@ -3135,6 +3305,17 @@ def process_docx_file(
     if title_bold_count:
         detailed_errors.append(
             "🖋️ **Tên đề tài:** Đã in đậm và bôi vàng."
+        )
+    if introduction_title_bold_count:
+        detailed_errors.append(
+            "🖋️ **Tên đề tài trong Đặt vấn đề:** Đã in đậm riêng tên "
+            f"đề tài theo template tại {introduction_title_bold_count} vị trí."
+        )
+    if goal_count_word_count:
+        detailed_errors.append(
+            "🔢 **Số lượng mục tiêu trong Đặt vấn đề:** Đã chuyển số "
+            f"sang chữ tại {goal_count_word_count} vị trí (ví dụ: "
+            "'2 mục tiêu' thành 'hai mục tiêu') và bôi vàng phần sửa."
         )
     if spacing_count:
         detailed_errors.append(
