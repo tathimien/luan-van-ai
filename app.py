@@ -1150,7 +1150,7 @@ def clean_spaces_and_punctuation(paragraph):
         original = run.text
         cleaned = original.replace("\xa0", " ").replace("\u200b", "")
         cleaned = re.sub(r" {2,}", " ", cleaned)
-        cleaned = re.sub(r"\s+([:,.!?])", r"\1", cleaned)
+        cleaned = re.sub(r"\s+([:;,.!?])", r"\1", cleaned)
         if cleaned != original:
             run.text = cleaned
             changed = True
@@ -1167,6 +1167,20 @@ def clean_spaces_and_punctuation(paragraph):
         ):
             next_run.text = next_run.text[1:]
             changed = True
+
+        # Word có thể tách dấu cách và dấu câu sang hai run khác nhau,
+        # ví dụ run 1 = "nội dung " và run 2 = ".". Xóa dấu cách thừa
+        # nhưng giữ nguyên kiểu chữ của từng run.
+        if (
+            current_run.text
+            and next_run.text
+            and current_run.text.endswith(" ")
+            and next_run.text[0] in ":;,.!?"
+        ):
+            stripped = current_run.text.rstrip(" ")
+            if stripped != current_run.text:
+                current_run.text = stripped
+                changed = True
 
     if runs_with_text:
         first_run = runs_with_text[0]
@@ -2812,7 +2826,10 @@ def process_docx_file(
     citation_paragraph_count = 0
     citation_moved_count = 0
     action_counts = Counter()
-    paragraphs = doc.paragraphs
+    # Duyệt theo thứ tự XML để xử lý thống nhất cả đoạn thường, đoạn trong
+    # bảng và đoạn trong text box. Trước đây các đoạn trong bảng chạy ở một
+    # vòng riêng nên số liệu báo cáo và một số thao tác không đồng nhất.
+    paragraphs = list(_all_document_paragraphs(doc))
     in_references = False
     citation_style = str(
         rules.get("citation_style", "numeric_superscript")
@@ -2986,34 +3003,6 @@ def process_docx_file(
                     if current_size not in allowed_font_sizes:
                         run.font.size = Pt(size_target)
                         font_size_corrected_count += 1
-
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for paragraph in cell.paragraphs:
-                    if paragraph._element in cover_p_elements:
-                        continue
-                    clean_spaces_and_punctuation(paragraph)
-                    if citation_style == "numeric_superscript":
-                        normalize_numeric_citations(
-                            paragraph,
-                            font_target,
-                            size_target,
-                        )
-                    paragraph.paragraph_format.line_spacing = line_target
-                    for run in paragraph.runs:
-                        if run._element in legacy_run_elements:
-                            continue
-                        run.font.name = font_target
-                        if not run.font.superscript:
-                            current_size = (
-                                round(run.font.size.pt, 1)
-                                if run.font.size is not None
-                                else None
-                            )
-                            if current_size not in allowed_font_sizes:
-                                run.font.size = Pt(size_target)
-                                font_size_corrected_count += 1
 
     if font_size_corrected_count:
         allowed_sizes_text = ", ".join(
