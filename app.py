@@ -1220,6 +1220,16 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
                 continue
             break
 
+        # Tách dấu cách ở cuối ra khỏi cụm trích dẫn. Word thường lưu
+        # "¹ " trong cùng một run lũy thừa; nếu không tách, phần mềm có
+        # thể bỏ sót hoặc làm dính chữ của câu tiếp theo.
+        if has_digit:
+            while (
+                end_index > index
+                and records[end_index - 1][0].isspace()
+            ):
+                end_index -= 1
+
         next_index = end_index
         while next_index < len(records) and records[next_index][0].isspace():
             next_index += 1
@@ -1228,6 +1238,18 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
             records,
             index,
             end_index,
+        )
+
+        previous_nonspace = len(normalized) - 1
+        while (
+            previous_nonspace >= 0
+            and normalized[previous_nonspace][0].isspace()
+        ):
+            previous_nonspace -= 1
+        already_after_punctuation = (
+            previous_nonspace >= 0
+            and normalized[previous_nonspace][0]
+            in SENTENCE_PUNCTUATION
         )
 
         if (
@@ -1246,68 +1268,55 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
             )
             index = next_index + 1
             moved_count += 1
-        elif has_digit and (
-            next_index >= len(records)
-            or records[next_index][0].isupper()
-        ):
-            # Học viên đã đặt số ở dạng lũy thừa nhưng quên dấu chấm.
-            # Xử lý cả cuối đoạn ("Nội dung¹,²") và giữa đoạn khi câu
-            # kế tiếp bắt đầu bằng chữ hoa ("Nội dung¹,² Câu tiếp...").
-            previous_nonspace = len(normalized) - 1
-            while (
-                previous_nonspace >= 0
-                and normalized[previous_nonspace][0].isspace()
-            ):
-                previous_nonspace -= 1
-            already_after_punctuation = (
-                previous_nonspace >= 0
-                and normalized[previous_nonspace][0]
-                in SENTENCE_PUNCTUATION
+        elif has_digit and not already_after_punctuation:
+            # Mọi trích dẫn số đều phải đứng sau dấu kết câu, kể cả khi
+            # đứng sau dấu ngoặc đóng: "tổn thương da)¹" ->
+            # "tổn thương da).¹". Không phụ thuộc phía sau là cuối đoạn,
+            # chữ hoa, chữ thường, dấu phẩy hay một dấu ngoặc khác.
+            while normalized and normalized[-1][0].isspace():
+                normalized.pop()
+            base_style = (
+                normalized[-1][1]
+                if normalized
+                else records[index][1]
             )
-            if not already_after_punctuation:
-                while normalized and normalized[-1][0].isspace():
-                    normalized.pop()
-                base_style = (
-                    normalized[-1][1]
-                    if normalized
-                    else records[index][1]
+            normalized.append(
+                (
+                    ".",
+                    _style_with(
+                        base_style,
+                        superscript=False,
+                        subscript=False,
+                        highlight=WD_COLOR_INDEX.YELLOW,
+                    ),
                 )
+            )
+            normalized.extend(
+                _highlight_superscript_record(record)
+                for record in records[index:end_index]
+                if not record[0].isspace()
+            )
+
+            had_space_after = next_index > end_index
+            next_is_letter = (
+                next_index < len(records)
+                and records[next_index][0].isalpha()
+            )
+            if next_index < len(records) and (
+                had_space_after or next_is_letter
+            ):
                 normalized.append(
                     (
-                        ".",
+                        " ",
                         _style_with(
                             base_style,
                             superscript=False,
                             subscript=False,
-                            highlight=WD_COLOR_INDEX.YELLOW,
                         ),
                     )
                 )
-                normalized.extend(
-                    _highlight_superscript_record(record)
-                    for record in records[index:end_index]
-                    if not record[0].isspace()
-                )
-                # Cuối đoạn: bỏ dấu cách thừa phía sau trích dẫn. Nếu
-                # còn câu tiếp theo, luôn tạo đúng một dấu cách thường;
-                # dấu cách cũ đôi khi nằm ngay trong run lũy thừa nên
-                # sẽ bị mất nếu chỉ loại phần định dạng số.
-                if next_index < len(records):
-                    normalized.append(
-                        (
-                            " ",
-                            _style_with(
-                                base_style,
-                                superscript=False,
-                                subscript=False,
-                            ),
-                        )
-                    )
-                index = next_index
-                moved_count += 1
-            else:
-                normalized.extend(records[index:end_index])
-                index = end_index
+            index = next_index
+            moved_count += 1
         else:
             normalized.extend(records[index:end_index])
             index = end_index
