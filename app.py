@@ -994,12 +994,54 @@ NUMERIC_CITATION_ITEM_PATTERN = re.compile(
     rf"\[\s*({NUMERIC_CITATION_CONTENT})\s*\]"
 )
 SENTENCE_PUNCTUATION = ".!?"
+UNICODE_SUPERSCRIPT_DIGITS = {
+    "⁰": "0",
+    "¹": "1",
+    "²": "2",
+    "³": "3",
+    "⁴": "4",
+    "⁵": "5",
+    "⁶": "6",
+    "⁷": "7",
+    "⁸": "8",
+    "⁹": "9",
+}
 SUPERSCRIPT_CITATION_CHARS = set("0123456789,;–—- ")
+SUPERSCRIPT_CITATION_CHARS.update(UNICODE_SUPERSCRIPT_DIGITS)
 
 
 def _is_superscript_citation_record(record):
     char, style = record
-    return style[2] and char in SUPERSCRIPT_CITATION_CHARS
+    return (
+        (style[2] and char in SUPERSCRIPT_CITATION_CHARS)
+        or char in UNICODE_SUPERSCRIPT_DIGITS
+    )
+
+
+def _is_probable_superscript_citation(records, start, end):
+    """Phân biệt số trích dẫn với số mũ của đơn vị như cm², mm², m³."""
+    cluster = "".join(char for char, _ in records[start:end])
+    normalized_cluster = "".join(
+        UNICODE_SUPERSCRIPT_DIGITS.get(char, char) for char in cluster
+    )
+    if not any(char.isdigit() for char in normalized_cluster):
+        return False
+
+    # Cụm 1,2 hoặc 3-5 gần như chắc chắn là một trích dẫn.
+    if any(mark in normalized_cluster for mark in ",;–—-"):
+        return True
+
+    prefix = "".join(char for char, _ in records[:start]).rstrip()
+    exponent = re.sub(r"\s+", "", normalized_cluster)
+    unit_match = re.search(
+        r"(?i)(?<!\w)(mm|cm|dm|km|m|nm|µm|μm|kg|mg|g|µg|μg|ml|dl|cl|l|ha)$",
+        prefix,
+    )
+    if exponent in {"2", "3"} and unit_match:
+        return False
+    if prefix and prefix[-1] in "+−×÷*/=^":
+        return False
+    return True
 
 
 def _highlight_record(record):
@@ -1013,7 +1055,7 @@ def _highlight_record(record):
 def _highlight_superscript_record(record):
     char, style = record
     return (
-        char,
+        UNICODE_SUPERSCRIPT_DIGITS.get(char, char),
         _style_with(
             style,
             superscript=True,
@@ -1182,6 +1224,12 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
         while next_index < len(records) and records[next_index][0].isspace():
             next_index += 1
 
+        has_digit = has_digit and _is_probable_superscript_citation(
+            records,
+            index,
+            end_index,
+        )
+
         if (
             has_digit
             and next_index < len(records)
@@ -1198,10 +1246,13 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
             )
             index = next_index + 1
             moved_count += 1
-        elif has_digit and next_index >= len(records):
-            # Học viên đã đặt số ở dạng lũy thừa nhưng quên dấu chấm,
-            # ví dụ "Nội dung¹,²". Thêm dấu chấm trước cụm trích dẫn,
-            # không đặt dấu chấm sau số lũy thừa.
+        elif has_digit and (
+            next_index >= len(records)
+            or records[next_index][0].isupper()
+        ):
+            # Học viên đã đặt số ở dạng lũy thừa nhưng quên dấu chấm.
+            # Xử lý cả cuối đoạn ("Nội dung¹,²") và giữa đoạn khi câu
+            # kế tiếp bắt đầu bằng chữ hoa ("Nội dung¹,² Câu tiếp...").
             previous_nonspace = len(normalized) - 1
             while (
                 previous_nonspace >= 0
@@ -1237,6 +1288,21 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
                     for record in records[index:end_index]
                     if not record[0].isspace()
                 )
+                # Cuối đoạn: bỏ dấu cách thừa phía sau trích dẫn. Nếu
+                # còn câu tiếp theo, luôn tạo đúng một dấu cách thường;
+                # dấu cách cũ đôi khi nằm ngay trong run lũy thừa nên
+                # sẽ bị mất nếu chỉ loại phần định dạng số.
+                if next_index < len(records):
+                    normalized.append(
+                        (
+                            " ",
+                            _style_with(
+                                base_style,
+                                superscript=False,
+                                subscript=False,
+                            ),
+                        )
+                    )
                 index = next_index
                 moved_count += 1
             else:
@@ -2281,8 +2347,26 @@ def _paragraph_style_name(paragraph):
 
 def _is_toc_paragraph(paragraph):
     normalized_style = _normalize_heading(_paragraph_style_name(paragraph))
-    return normalized_style.startswith(
+    if normalized_style.startswith(
         ("TOC", "MUC LUC", "CONTENTS", "TABLE OF CONTENTS")
+    ):
+        return True
+
+    # Một số file Word làm mất style TOC nhưng vẫn giữ liên kết của mục
+    # lục tới bookmark _Toc... Không được nhầm liên kết này với tiêu đề
+    # "TÀI LIỆU THAM KHẢO" thật ở cuối luận văn.
+    xml = paragraph._element.xml
+    return bool(
+        ("w:hyperlink" in xml and 'w:anchor="_Toc' in xml)
+        or ("PAGEREF" in xml and "_Toc" in xml)
+    )
+
+
+def _is_actual_references_heading(paragraph):
+    """Chỉ nhận tiêu đề tài liệu tham khảo thật, bỏ dòng cùng tên ở mục lục."""
+    return (
+        is_references_heading(paragraph.text)
+        and not _is_toc_paragraph(paragraph)
     )
 
 
@@ -2782,7 +2866,7 @@ def mark_abbreviations_and_subjectless_sentences(
         text = paragraph.text.strip()
         if not text:
             continue
-        if is_references_heading(text):
+        if _is_actual_references_heading(paragraph):
             in_references = True
             continue
         if in_references and is_heading_after_references(text):
@@ -2984,7 +3068,7 @@ def process_docx_file(
         if enforce_bold_for_thesis_title(paragraph):
             title_bold_count += 1
 
-        if is_references_heading(paragraph.text):
+        if _is_actual_references_heading(paragraph):
             in_references = True
             continue
         if in_references and is_heading_after_references(paragraph.text):
