@@ -512,10 +512,100 @@ else:
     load_rules_for_pdf = _load_rules_for_pdf
 
 
+def _paragraph_has_hard_page_break(paragraph):
+    """Kiểm tra ngắt trang thủ công nằm trong một đoạn Word."""
+    xml = paragraph._element.xml
+    return "w:br" in xml and 'type="page"' in xml
+
+
+def _has_page_boundary_before(paragraphs, index):
+    """Kiểm tra vị trí đã có ngắt trang trước đoạn ``index`` hay chưa."""
+    paragraph = paragraphs[index]
+    if paragraph.paragraph_format.page_break_before:
+        return True
+
+    # Ngắt trang thường nằm ở đoạn có chữ "HÀ NỘI – 2026"; giữa đoạn
+    # đó và tiêu đề trang sau đôi khi có vài đoạn rỗng nên quét lùi.
+    for previous_index in range(index - 1, max(-1, index - 6), -1):
+        previous = paragraphs[previous_index]
+        if _paragraph_has_hard_page_break(previous):
+            return True
+        if previous.text.strip():
+            break
+    return False
+
+
+def _ensure_cover_page_boundaries(doc):
+    """Khóa bìa chính, bìa phụ và phần nội dung trên các trang riêng.
+
+    Một số file học viên chỉ có ``lastRenderedPageBreak`` do Word tự dàn
+    trang, không có ngắt trang thủ công. Khi chương trình chỉnh cỡ chữ hoặc
+    khoảng cách, phần bìa ngắn đi và nội dung phía sau có thể bị kéo lên.
+    Hàm này đặt ``pageBreakBefore`` ở đầu bìa phụ và đầu phần nội dung khi
+    vị trí đó chưa có ngắt trang thật.
+    """
+    paragraphs = list(doc.paragraphs)
+    if not paragraphs:
+        return []
+
+    normalized_headings = [
+        _normalize_heading(paragraph.text) for paragraph in paragraphs
+    ]
+    body_start_keys = {
+        "LOI CAM ON",
+        "LOI CAM DOAN",
+        "MUC LUC",
+        "DANH MUC CHU VIET TAT",
+        "DANH MUC BANG",
+        "DANH MUC HINH",
+        "DANH MUC SO DO",
+        "DAT VAN DE",
+        "TONG QUAN",
+        "INTRODUCTION",
+    }
+    body_start_index = next(
+        (
+            index
+            for index, heading in enumerate(normalized_headings)
+            if heading in body_start_keys
+        ),
+        None,
+    )
+
+    # Bìa chính và bìa phụ thường cùng bắt đầu bằng dòng Bộ GD&ĐT/Bộ Y tế.
+    # Chỉ tìm trong vùng trước nội dung để không nhận nhầm các trang sau.
+    search_end = body_start_index if body_start_index is not None else 80
+    cover_start_indices = [
+        index
+        for index, heading in enumerate(normalized_headings[:search_end])
+        if "BO GIAO DUC" in heading
+    ]
+
+    protected_boundaries = []
+    if len(cover_start_indices) >= 2:
+        second_cover_index = cover_start_indices[1]
+        if not _has_page_boundary_before(paragraphs, second_cover_index):
+            paragraphs[
+                second_cover_index
+            ].paragraph_format.page_break_before = True
+            protected_boundaries.append("bìa phụ")
+
+    if (
+        body_start_index is not None
+        and not _has_page_boundary_before(paragraphs, body_start_index)
+    ):
+        paragraphs[body_start_index].paragraph_format.page_break_before = True
+        protected_boundaries.append("phần nội dung")
+
+    return protected_boundaries
+
+
 def optimize_cover_pages(doc):
     cover_errors = []
     cover_p_elements = set()
     cover_paragraphs = []
+
+    protected_boundaries = _ensure_cover_page_boundaries(doc)
 
     cover_table_keywords = [
         "BỘ GIÁO DỤC",
@@ -597,6 +687,12 @@ def optimize_cover_pages(doc):
         "🖼️ **Bảo toàn Trang Bìa & Logo:** Đã giữ nguyên khung viền, "
         "logo trường, co nhỏ dòng trống (6pt) và cố định trang bìa."
     )
+    if protected_boundaries:
+        cover_errors.append(
+            "📄 **Khóa ngắt trang:** Đã tạo ngắt trang cố định trước "
+            + " và ".join(protected_boundaries)
+            + "; nội dung phía sau sẽ không bị đẩy ngược lên trang bìa."
+        )
     return cover_errors, cover_p_elements
 
 
