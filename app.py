@@ -64,14 +64,27 @@ DEFAULT_RULES = {
 # độc lập vì rất dễ ghép nhầm quy định của loại này với template của loại khác.
 DOCUMENT_PROFILES = {
     "master_research": {
-        "label": "Luận văn thạc sĩ định hướng nghiên cứu",
-        "short_label": "Thạc sĩ nghiên cứu",
+        "label": "Luận văn THS nghiên cứu - NCS - BSCK2",
+        "short_label": "THS nghiên cứu - NCS - BSCK2",
         "template_file": (
-            "Văn_Luận văn Thạc sĩ nghiên cứu -Template 2026.docx"
+            "Văn_Luận văn THS nghiên cứu -NCS-BSCK2 "
+            "-Template 2026.docx"
         ),
-        "template_aliases": ["luan_van_thac_si_nghien_cuu.docx"],
-        "regulation_file": "quy_dinh_luan_van_thac_si_nghien_cuu.pdf",
-        "output_file": "LuanVan_ThacSi_NghienCuu_DaKiemTra.docx",
+        "template_aliases": [
+            "luan_van_THS_nghien_cuu_NCS_BSCK2.docx",
+            "Văn_Luận văn Thạc sĩ nghiên cứu -Template 2026.docx",
+            "luan_van_thac_si_nghien_cuu.docx",
+        ],
+        "regulation_file": (
+            "quy_dinh_luan_van_THS nghien cuu_NCS_BSCK2.pdf"
+        ),
+        "regulation_aliases": [
+            "quy_dinh_luan_van_THS_nghien_cuu_NCS_BSCK2.pdf",
+            "quy_dinh_luan_van_thac_si_nghien_cuu.pdf",
+        ],
+        "output_file": (
+            "LuanVan_THS_NghienCuu_NCS_BSCK2_DaKiemTra.docx"
+        ),
     },
     "master_application": {
         "label": "Luận văn thạc sĩ định hướng ứng dụng",
@@ -84,29 +97,41 @@ DOCUMENT_PROFILES = {
         "output_file": "LuanVan_ThacSi_UngDung_DaKiemTra.docx",
     },
     "proposal_master_research": {
-        "label": "Đề cương luận văn thạc sĩ định hướng nghiên cứu",
-        "short_label": "Đề cương thạc sĩ nghiên cứu",
+        "label": "Đề cương luận văn THS nghiên cứu - NCS - BSCK2",
+        "short_label": "Đề cương THS nghiên cứu - NCS - BSCK2",
         "template_file": (
-            "Văn_Template_Đề cương_Luận văn Thạc sĩ nghiên cứu "
-            "-Template 2026.docx"
+            "Văn_Template_Đề cương_Luận văn THS nghiên cứu "
+            "-NCS-BSCK2.docx"
         ),
         "template_aliases": [
-            "de_cuong_luan_van_thac_si_nghien_cuu.docx"
+            "de_cuong_luan_van_THS_nghien_cuu_NCS_BSCK2.docx",
+            "Văn_Template_Đề cương_Luận văn Thạc sĩ nghiên cứu "
+            "-Template 2026.docx",
+            "de_cuong_luan_van_thac_si_nghien_cuu.docx",
         ],
         "regulation_file": (
-            "quy_dinh_de_cuong_luan_van_thac_si_nghien_cuu.pdf"
+            "quy_dinh_de_cuong_luan_van_THS nghien cuu_"
+            "NCS_BSCK2.pdf"
         ),
-        "output_file": "DeCuong_ThacSi_NghienCuu_DaKiemTra.docx",
+        "regulation_aliases": [
+            "quy_dinh_de_cuong_luan_van_THS_nghien_cuu_"
+            "NCS_BSCK2.pdf",
+            "quy_dinh_de_cuong_luan_van_thac_si_nghien_cuu.pdf",
+        ],
+        "output_file": (
+            "DeCuong_THS_NghienCuu_NCS_BSCK2_DaKiemTra.docx"
+        ),
     },
     "proposal_master_application": {
         "label": "Đề cương luận văn thạc sĩ định hướng ứng dụng",
         "short_label": "Đề cương thạc sĩ ứng dụng",
         "template_file": (
-            "Văn_Template_Đề cương_Luận văn Thạc sĩ ứng dụng "
-            "-Template 2026.docx"
+            "Văn_Template_Đề cương_Luận văn Thạc sĩ ứng dụng.docx"
         ),
         "template_aliases": [
-            "de_cuong_luan_van_thac_si_ung_dung.docx"
+            "Văn_Template_Đề cương_Luận văn Thạc sĩ ứng dụng "
+            "-Template 2026.docx",
+            "de_cuong_luan_van_thac_si_ung_dung.docx",
         ],
         "regulation_file": (
             "quy_dinh_de_cuong_luan_van_thac_si_ung_dung.pdf"
@@ -122,8 +147,15 @@ def _copy_default_rules():
 
 
 def _filename_key(filename):
-    """So tên file không phụ thuộc cách Windows/macOS lưu dấu tiếng Việt."""
-    normalized = unicodedata.normalize("NFD", str(filename)).replace("Đ", "D")
+    """So tên file linh hoạt với dấu tiếng Việt và hậu tố (1), (2)."""
+    filename_text = str(filename).strip()
+    stem, extension = os.path.splitext(filename_text)
+    # Trình duyệt/Windows thường tự thêm (1), (2) khi tải lại cùng tên.
+    # Bỏ phần này để file mới vẫn khớp cấu hình mà không cần sửa code.
+    stem = re.sub(r"\s*\(\d+\)\s*$", "", stem)
+    normalized = unicodedata.normalize(
+        "NFD", f"{stem}{extension}"
+    ).replace("Đ", "D")
     normalized = normalized.replace("đ", "d")
     normalized = "".join(
         char for char in normalized if unicodedata.category(char) != "Mn"
@@ -131,17 +163,33 @@ def _filename_key(filename):
     return re.sub(r"\s+", " ", normalized).strip().casefold()
 
 
+def _filename_copy_number(filename):
+    """Lấy số ở hậu tố (1), (2)...; tên gốc được xem là phiên bản 0."""
+    stem, _ = os.path.splitext(str(filename).strip())
+    match = re.search(r"\s*\((\d+)\)\s*$", stem)
+    return int(match.group(1)) if match else 0
+
+
 def _resolve_named_asset(folder, preferred_name, aliases=None):
     candidates = [preferred_name, *(aliases or [])]
     if os.path.isdir(folder):
-        actual_names = {
-            _filename_key(name): name
-            for name in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, name))
-        }
+        actual_names = {}
+        for name in os.listdir(folder):
+            if not os.path.isfile(os.path.join(folder, name)):
+                continue
+            actual_names.setdefault(_filename_key(name), []).append(name)
         for candidate in candidates:
-            actual_name = actual_names.get(_filename_key(candidate))
-            if actual_name:
+            matching_names = actual_names.get(_filename_key(candidate), [])
+            if matching_names:
+                # Khi tên gốc và các bản (1), (2) cùng tồn tại, ưu tiên số
+                # lớn nhất vì đây thường là file người quản trị mới tải lên.
+                actual_name = max(
+                    matching_names,
+                    key=lambda name: (
+                        _filename_copy_number(name),
+                        name.casefold(),
+                    ),
+                )
                 return os.path.join(folder, actual_name), actual_name
     return os.path.join(folder, preferred_name), preferred_name
 
