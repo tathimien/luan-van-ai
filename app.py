@@ -1140,6 +1140,12 @@ UNICODE_SUPERSCRIPT_DIGITS = {
 }
 SUPERSCRIPT_CITATION_CHARS = set("0123456789,;–—- ")
 SUPERSCRIPT_CITATION_CHARS.update(UNICODE_SUPERSCRIPT_DIGITS)
+MATH_OPERATOR_CHARS = set("=+−×÷*/^·±∓≈≠≤≥√∑∫")
+MATH_GROUP_CLOSE = set(")]}")
+MATH_GREEK_AND_SPECIAL_SYMBOLS = set(
+    "αΑβΒγΓδΔεΕζΖηΗθΘιΙκΚλΛμΜνΝξΞοΟπΠρΡσΣτΤυΥφΦχΧψΨωΩ"
+    "∞∂∇"
+)
 
 
 def _is_superscript_citation_record(record):
@@ -1150,8 +1156,92 @@ def _is_superscript_citation_record(record):
     )
 
 
+def _nearest_nonspace_char(records, start, step):
+    """Lấy ký tự gần nhất khác khoảng trắng theo một hướng."""
+    index = start
+    while 0 <= index < len(records):
+        char = records[index][0]
+        if not char.isspace():
+            return char
+        index += step
+    return ""
+
+
+def _is_formula_superscript(records, start, end):
+    """
+    Nhận diện số mũ toán học để không xử lý nhầm thành trích dẫn.
+
+    Các trường hợp được giữ nguyên gồm χ², R², cm², m³ và số mũ trong
+    biểu thức có toán tử như ``... )² × chiều cao``. Chỉ dùng các dấu
+    hiệu toán học rõ ràng để không bỏ sót trích dẫn thật sau một câu.
+    """
+    cluster = "".join(char for char, _ in records[start:end])
+    normalized_cluster = "".join(
+        UNICODE_SUPERSCRIPT_DIGITS.get(char, char) for char in cluster
+    )
+    compact_cluster = re.sub(r"\s+", "", normalized_cluster)
+    if not compact_cluster or not compact_cluster.isdigit():
+        # Cụm có dấu phẩy, chấm phẩy hoặc gạch nối là danh sách/range
+        # trích dẫn, không phải một số mũ đơn.
+        return False
+
+    prefix = "".join(char for char, _ in records[:start]).rstrip()
+    suffix = "".join(char for char, _ in records[end:]).lstrip()
+    previous_char = _nearest_nonspace_char(records, start - 1, -1)
+    next_char = _nearest_nonspace_char(records, end, 1)
+
+    # Đơn vị diện tích/thể tích: cm², mm², m³, µm²...
+    unit_match = re.search(
+        r"(?i)(?<!\w)(mm|cm|dm|km|m|nm|µm|μm|kg|mg|g|µg|μg|"
+        r"ml|dl|cl|l|ha)$",
+        prefix,
+    )
+    if compact_cluster in {"2", "3"} and unit_match:
+        return True
+
+    # Ký hiệu Hy Lạp và ký hiệu thống kê/toán học: χ², σ², π²...
+    if previous_char in MATH_GREEK_AND_SPECIAL_SYMBOLS:
+        return True
+
+    # Biến đơn Latin thường gặp: R², x², y³. Yêu cầu biến là một token
+    # độc lập để từ tiếng Việt kết thúc bằng một chữ cái không bị nhầm.
+    variable_match = re.search(r"(?<![\wÀ-ỹ])([A-Za-z])$", prefix)
+    if compact_cluster in {"2", "3"} and variable_match:
+        return True
+
+    # Số mũ nằm sát toán tử: a^n, (...)² × ..., 10² ÷ ...
+    if previous_char in MATH_OPERATOR_CHARS or next_char in MATH_OPERATOR_CHARS:
+        return True
+
+    # Công thức kết thúc ngay sau một ngoặc, ví dụ (a + b)². Chỉ nhận là
+    # công thức khi phần bên trái gần đó có toán tử/ký hiệu toán học.
+    if compact_cluster in {"2", "3"} and previous_char in MATH_GROUP_CLOSE:
+        local_prefix = prefix[-120:]
+        has_formula_marker = any(
+            char in MATH_OPERATOR_CHARS
+            or char in MATH_GREEK_AND_SPECIAL_SYMBOLS
+            for char in local_prefix
+        )
+        if has_formula_marker:
+            return True
+
+    # Biểu thức số như 10² chỉ được kết luận là số mũ khi có ngữ cảnh
+    # toán học gần kề; tránh nhầm số tài liệu tham khảo đặt sau một tỷ lệ.
+    if (
+        compact_cluster in {"2", "3"}
+        and previous_char.isdigit()
+        and any(
+            char in MATH_OPERATOR_CHARS
+            for char in prefix[-80:] + suffix[:40]
+        )
+    ):
+        return True
+
+    return False
+
+
 def _is_probable_superscript_citation(records, start, end):
-    """Phân biệt số trích dẫn với số mũ của đơn vị như cm², mm², m³."""
+    """Phân biệt số trích dẫn với số mũ toán học hoặc số mũ của đơn vị."""
     cluster = "".join(char for char, _ in records[start:end])
     normalized_cluster = "".join(
         UNICODE_SUPERSCRIPT_DIGITS.get(char, char) for char in cluster
@@ -1163,14 +1253,10 @@ def _is_probable_superscript_citation(records, start, end):
     if any(mark in normalized_cluster for mark in ",;–—-"):
         return True
 
-    prefix = "".join(char for char, _ in records[:start]).rstrip()
-    exponent = re.sub(r"\s+", "", normalized_cluster)
-    unit_match = re.search(
-        r"(?i)(?<!\w)(mm|cm|dm|km|m|nm|µm|μm|kg|mg|g|µg|μg|ml|dl|cl|l|ha)$",
-        prefix,
-    )
-    if exponent in {"2", "3"} and unit_match:
+    if _is_formula_superscript(records, start, end):
         return False
+
+    prefix = "".join(char for char, _ in records[:start]).rstrip()
     if prefix and prefix[-1] in "+−×÷*/=^":
         return False
     return True
@@ -1212,6 +1298,7 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
     matches = list(NUMERIC_CITATION_PATTERN.finditer(text))
     converted_count = len(matches)
     moved_count = 0
+    formula_skipped_count = 0
 
     if records and matches:
         rebuilt = []
@@ -1305,6 +1392,7 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
         return {
             "converted": 0,
             "moved_after_period": 0,
+            "formula_skipped": 0,
             "changed": False,
         }
 
@@ -1366,10 +1454,21 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
         while next_index < len(records) and records[next_index][0].isspace():
             next_index += 1
 
-        has_digit = has_digit and _is_probable_superscript_citation(
+        is_formula_superscript = has_digit and _is_formula_superscript(
             records,
             index,
             end_index,
+        )
+        if is_formula_superscript:
+            formula_skipped_count += 1
+        has_digit = (
+            has_digit
+            and not is_formula_superscript
+            and _is_probable_superscript_citation(
+                records,
+                index,
+                end_index,
+            )
         )
 
         previous_nonspace = len(normalized) - 1
@@ -1464,6 +1563,7 @@ def normalize_numeric_citations(paragraph, font_target, size_target):
     return {
         "converted": converted_count,
         "moved_after_period": moved_count,
+        "formula_skipped": formula_skipped_count,
         "changed": changed,
     }
 
@@ -3328,6 +3428,7 @@ def process_docx_file(
     goal_count_word_count = 0
     citation_paragraph_count = 0
     citation_moved_count = 0
+    formula_superscript_skipped_count = 0
     action_counts = Counter()
     # Duyệt theo thứ tự XML để xử lý thống nhất cả đoạn thường, đoạn trong
     # bảng và đoạn trong text box. Trước đây các đoạn trong bảng chạy ở một
@@ -3416,6 +3517,9 @@ def process_docx_file(
                     citation_paragraph_count += 1
                 citation_moved_count += citation_result[
                     "moved_after_period"
+                ]
+                formula_superscript_skipped_count += citation_result[
+                    "formula_skipped"
                 ]
 
     check_image_citations(
@@ -3533,6 +3637,13 @@ def process_docx_file(
             "✨ **Vị trí trích dẫn số:** Đã đưa số lũy thừa ra sau "
             f"dấu chấm và bôi vàng cả dấu chấm cùng số trích dẫn tại "
             f"{citation_moved_count} vị trí."
+        )
+    if formula_superscript_skipped_count:
+        detailed_errors.append(
+            "🧮 **Công thức và ký tự đặc biệt:** Đã nhận diện và giữ "
+            f"nguyên {formula_superscript_skipped_count} số mũ toán học "
+            "(ví dụ χ², R², cm², m³ hoặc công thức có dấu =, ×); "
+            "không tự động chèn dấu chấm."
         )
 
     font_size_corrected_count = 0
