@@ -2196,6 +2196,133 @@ def _find_cover_content_boundary(paragraphs):
     return None
 
 
+def _count_cover_pages_from_document(doc):
+    """Đếm số bìa trước phần nội dung theo dấu hiệu của template HMU."""
+    paragraphs = list(_all_document_paragraphs(doc))
+    preamble = []
+    for paragraph in paragraphs:
+        if "CẢNH BÁO CẤU TRÚC" in paragraph.text.upper():
+            continue
+        structure_key = (
+            None
+            if _is_toc_paragraph(paragraph)
+            else _canonical_structure_key(paragraph.text)
+        )
+        if structure_key in COVER_END_STRUCTURE_KEYS:
+            break
+        preamble.append(paragraph)
+
+    normalized_lines = [
+        _normalize_heading(paragraph.text)
+        for paragraph in preamble
+        if paragraph.text.strip()
+    ]
+    school_count = sum(
+        "TRUONG DAI HOC Y HA NOI" in line
+        for line in normalized_lines
+    )
+    if school_count:
+        return school_count
+
+    ministry_count = sum(
+        "BO GIAO DUC" in line for line in normalized_lines
+    )
+    if ministry_count:
+        return ministry_count
+
+    # Dự phòng khi học viên xóa dòng tên trường nhưng vẫn còn tên loại hồ sơ.
+    return sum(
+        bool(
+            re.search(
+                r"\b(?:LUAN VAN|LUAN AN|DE CUONG LUAN VAN|KHOA LUAN)\b",
+                line,
+            )
+        )
+        for line in normalized_lines
+    )
+
+
+def _load_template_document(template_path=None, template_bytes=None):
+    if template_bytes:
+        return docx.Document(io.BytesIO(template_bytes))
+    if template_path and os.path.exists(template_path):
+        return docx.Document(template_path)
+    return None
+
+
+def check_cover_pages_against_template(
+    doc,
+    template_path,
+    detailed_errors,
+    font_target,
+    template_bytes=None,
+):
+    """So số trang bìa của học viên với đúng template hồ sơ đã chọn."""
+    template_doc = _load_template_document(
+        template_path=template_path,
+        template_bytes=template_bytes,
+    )
+    if template_doc is None:
+        return {"expected": 0, "actual": 0, "missing": 0, "extra": 0}
+
+    expected_count = _count_cover_pages_from_document(template_doc)
+    actual_count = _count_cover_pages_from_document(doc)
+    missing_count = max(0, expected_count - actual_count)
+    extra_count = max(0, actual_count - expected_count)
+    result = {
+        "expected": expected_count,
+        "actual": actual_count,
+        "missing": missing_count,
+        "extra": extra_count,
+    }
+    if not expected_count or (not missing_count and not extra_count):
+        return result
+
+    if missing_count:
+        warning = (
+            "Thiếu trang bìa so với template: template yêu cầu "
+            f"{expected_count} trang, hồ sơ học viên có {actual_count} trang; "
+            f"cần bổ sung {missing_count} trang bìa."
+        )
+        detailed_errors.append(
+            "🟨 **Trang bìa theo template:** Template yêu cầu "
+            f"{expected_count} trang bìa; hồ sơ có {actual_count}; "
+            f"thiếu {missing_count} trang. Đã chèn cảnh báo bôi vàng."
+        )
+    else:
+        warning = (
+            "Thừa trang bìa so với template: template yêu cầu "
+            f"{expected_count} trang, hồ sơ học viên có {actual_count} trang; "
+            f"cần rà soát {extra_count} trang bìa thừa."
+        )
+        detailed_errors.append(
+            "🟨 **Trang bìa theo template:** Template yêu cầu "
+            f"{expected_count} trang bìa; hồ sơ có {actual_count}; "
+            f"thừa {extra_count} trang. Đã chèn cảnh báo bôi vàng."
+        )
+
+    paragraphs = list(_all_document_paragraphs(doc))
+    boundary_index = _find_cover_content_boundary(paragraphs)
+    warning_text = "⚠️ [CẢNH BÁO CẤU TRÚC]: " + warning
+    if boundary_index is not None:
+        # Đặt sau tiêu đề đầu tiên của phần nội dung để cảnh báo không bị
+        # kéo ngược lên bìa và vẫn nhìn thấy ngay khi mở file kết quả.
+        _insert_image_warning(
+            doc,
+            paragraphs[boundary_index],
+            warning_text,
+            font_target,
+        )
+    else:
+        warning_paragraph = doc.add_paragraph()
+        warning_run = warning_paragraph.add_run(warning_text)
+        warning_run.bold = True
+        warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        if font_target:
+            warning_run.font.name = font_target
+    return result
+
+
 def check_image_citations(
     doc,
     cover_p_elements,
@@ -3132,6 +3259,13 @@ def process_docx_file(
             f"📘 **Hồ sơ được chọn:** {profile_label}{source_text}."
         )
     check_structure_against_template(
+        doc,
+        template_path,
+        detailed_errors,
+        font_target,
+        template_bytes=template_bytes,
+    )
+    check_cover_pages_against_template(
         doc,
         template_path,
         detailed_errors,
