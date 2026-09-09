@@ -170,6 +170,23 @@ def _filename_copy_number(filename):
     return int(match.group(1)) if match else 0
 
 
+def checked_output_filename(uploaded_filename):
+    """Giữ tên file học viên và thêm hậu tố ``_Đã kiểm tra``."""
+    original_name = str(uploaded_filename or "").strip()
+    # Không cho thành phần đường dẫn từ trình duyệt đi vào tên tải xuống.
+    original_name = re.split(r"[\\/]", original_name)[-1]
+    stem, _ = os.path.splitext(original_name)
+    stem = stem.strip() or "Hồ sơ"
+    # Nếu học viên kiểm tra lại chính file kết quả, không lặp hậu tố.
+    stem = re.sub(
+        r"(?i)[ _-]*(?:đã[ _-]*kiểm[ _-]*tra|"
+        r"da[ _-]*kiem[ _-]*tra)\s*$",
+        "",
+        stem,
+    ).rstrip(" _-")
+    return f"{stem}_Đã kiểm tra.docx"
+
+
 def _resolve_named_asset(folder, preferred_name, aliases=None):
     candidates = [preferred_name, *(aliases or [])]
     if os.path.isdir(folder):
@@ -4342,7 +4359,9 @@ def main():
                 st.download_button(
                     label="📥 TẢI FILE ĐÃ KIỂM TRA VÀ HIGHLIGHT",
                     data=fixed_stream,
-                    file_name=profile["output_file"],
+                    file_name=checked_output_filename(
+                        uploaded_docx.name
+                    ),
                     mime=(
                         "application/vnd.openxmlformats-officedocument."
                         "wordprocessingml.document"
