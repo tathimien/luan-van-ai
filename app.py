@@ -2698,6 +2698,7 @@ def _canonical_structure_key(text):
         "SAN PHAM DU KIEN": "SAN PHAM DU KIEN",
         "KET LUAN": "KET LUAN",
         "KIEN NGHI": "KIEN NGHI",
+        "KHUYEN NGHI": "KIEN NGHI",
         "TAI LIEU THAM KHAO": "TAI LIEU THAM KHAO",
         "REFERENCES": "TAI LIEU THAM KHAO",
         "PHU LUC": "PHU LUC",
@@ -2861,6 +2862,415 @@ def _template_structure(template_path=None, template_bytes=None):
         if template_requested:
             raise ValueError(f"Không thể đọc cấu trúc template: {exc}") from exc
     return list(FALLBACK_STRUCTURE)
+
+
+PROFILE_COVER_LABELS = {
+    "master_research": "Luận văn THS nghiên cứu - NCS - BSCK2",
+    "master_application": "Luận văn thạc sĩ định hướng ứng dụng",
+    "proposal_master_research": (
+        "Đề cương luận văn THS nghiên cứu - NCS - BSCK2"
+    ),
+    "proposal_master_application": (
+        "Đề cương luận văn thạc sĩ định hướng ứng dụng"
+    ),
+}
+
+
+def _cover_profile_evidence(doc):
+    """Đọc loại hồ sơ và định hướng đào tạo ghi trên hai trang bìa."""
+    paragraphs = list(_all_document_paragraphs(doc))
+    boundary_index = _find_cover_content_boundary(paragraphs)
+    cover_paragraphs = paragraphs[
+        : boundary_index if boundary_index is not None else 120
+    ]
+    evidence_paragraphs = []
+    normalized_lines = []
+    for paragraph in cover_paragraphs:
+        if not paragraph.text.strip():
+            continue
+        normalized = _normalize_heading(paragraph.text)
+        normalized_lines.append(normalized)
+        if any(
+            marker in normalized
+            for marker in (
+                "DE CUONG",
+                "LUAN VAN",
+                "LUAN AN",
+                "DINH HUONG UNG DUNG",
+                "THAC SI UNG DUNG",
+                "DINH HUONG NGHIEN CUU",
+                "THAC SI NGHIEN CUU",
+                "THS NGHIEN CUU",
+                "CHUYEN KHOA CAP II",
+                "TIEN SI Y HOC",
+            )
+        ):
+            evidence_paragraphs.append(paragraph)
+
+    cover_text = "\n".join(normalized_lines)
+    is_proposal = "DE CUONG" in cover_text
+    has_application = bool(
+        re.search(
+            r"DINH HUONG\s+UNG DUNG|"
+            r"THAC SI(?:\s+DINH HUONG)?\s+UNG DUNG",
+            cover_text,
+        )
+    )
+    has_research = bool(
+        re.search(
+            r"DINH HUONG\s+NGHIEN CUU|"
+            r"THAC SI(?:\s+DINH HUONG)?\s+NGHIEN CUU|"
+            r"THS\s+NGHIEN CUU|CHUYEN KHOA CAP II|TIEN SI Y HOC",
+            cover_text,
+        )
+    )
+    directions = []
+    if has_application:
+        directions.append("application")
+    if has_research:
+        directions.append("research")
+
+    detected_key = None
+    if len(directions) == 1:
+        prefix = "proposal_" if is_proposal else ""
+        detected_key = f"{prefix}master_{directions[0]}"
+    return {
+        "detected_key": detected_key,
+        "is_proposal": is_proposal,
+        "directions": directions,
+        "evidence_paragraphs": evidence_paragraphs,
+    }
+
+
+def check_cover_profile_against_selection(
+    doc,
+    profile_key,
+    detailed_errors,
+):
+    """Cảnh báo khi loại hồ sơ trên bìa không khớp template đã chọn."""
+    if profile_key not in PROFILE_COVER_LABELS:
+        return {"detected_key": None, "matches": None}
+
+    evidence = _cover_profile_evidence(doc)
+    detected_key = evidence["detected_key"]
+    evidence_paragraphs = evidence["evidence_paragraphs"]
+    expected_label = PROFILE_COVER_LABELS[profile_key]
+
+    if len(evidence["directions"]) > 1:
+        for paragraph in evidence_paragraphs:
+            _highlight_structure_paragraph(paragraph)
+        detailed_errors.append(
+            "🟨 **Loại hồ sơ trên bìa không thống nhất:** Bìa có đồng "
+            "thời nội dung 'định hướng ứng dụng' và 'định hướng nghiên "
+            f"cứu', trong khi template đang chọn là {expected_label}. "
+            "Đã bôi vàng các dòng cần rà soát."
+        )
+        return {"detected_key": None, "matches": False}
+
+    if detected_key is None:
+        for paragraph in evidence_paragraphs:
+            _highlight_structure_paragraph(paragraph)
+        detailed_errors.append(
+            "🟨 **Không xác định được loại hồ sơ trên bìa:** Bìa phải "
+            "ghi rõ là luận văn/đề cương và định hướng nghiên cứu/ứng "
+            f"dụng theo template {expected_label}. Đã bôi vàng dòng "
+            "loại hồ sơ để rà soát."
+        )
+        return {"detected_key": None, "matches": False}
+
+    detected_label = PROFILE_COVER_LABELS[detected_key]
+    if detected_key != profile_key:
+        for paragraph in evidence_paragraphs:
+            _highlight_structure_paragraph(paragraph)
+        detailed_errors.append(
+            "🟨 **Bìa không khớp loại hồ sơ đã chọn:** Bìa được nhận "
+            f"diện là {detected_label}, nhưng phần mềm đang đối chiếu "
+            f"theo {expected_label}. Đã bôi vàng các dòng loại hồ sơ; "
+            "cần chọn đúng loại hoặc sửa lại bìa."
+        )
+        return {"detected_key": detected_key, "matches": False}
+
+    detailed_errors.append(
+        f"✅ **Loại hồ sơ trên bìa:** {detected_label}; khớp với "
+        "template và quy định đang được áp dụng."
+    )
+    return {"detected_key": detected_key, "matches": True}
+
+
+CHAPTER_LINE_PATTERN = re.compile(
+    r"^\s*(?P<label>CHƯƠNG|CHUONG|CHAPTER)\s+"
+    r"(?P<number>\d+|[IVXLCDM]+)"
+    r"(?P<separator>[.:\-–—]?)\s*(?P<title>.*?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_generated_checker_warning(paragraph):
+    text = paragraph.text
+    return bool(
+        STRUCTURE_WARNING_PARAGRAPH_PATTERN.search(text)
+        or IMAGE_WARNING_PARAGRAPH_PATTERN.search(text)
+        or "[CẢNH BÁO NGẮT TRANG]" in text.upper()
+        or "[CẢNH BÁO TIÊU ĐỀ CHƯƠNG]" in text.upper()
+    )
+
+
+def _previous_meaningful_paragraph_index(paragraphs, index):
+    for previous_index in range(index - 1, -1, -1):
+        paragraph = paragraphs[previous_index]
+        if (
+            paragraph.text.strip()
+            and not _is_toc_paragraph(paragraph)
+            and not _is_generated_checker_warning(paragraph)
+        ):
+            return previous_index
+    return None
+
+
+def _next_meaningful_paragraph_index(paragraphs, index):
+    for next_index in range(index + 1, len(paragraphs)):
+        paragraph = paragraphs[next_index]
+        if (
+            paragraph.text.strip()
+            and not _is_toc_paragraph(paragraph)
+            and not _is_generated_checker_warning(paragraph)
+        ):
+            return next_index
+    return None
+
+
+def _template_chapter_layout(template_doc):
+    """Lấy số chương và tên chương từ đúng template đang áp dụng."""
+    paragraphs = list(_all_document_paragraphs(template_doc))
+    chapters = []
+    for index, paragraph in enumerate(paragraphs):
+        if _is_toc_paragraph(paragraph):
+            continue
+        match = CHAPTER_LINE_PATTERN.fullmatch(paragraph.text.strip())
+        if not match or match.group("separator") or match.group("title"):
+            continue
+        title_index = _next_meaningful_paragraph_index(paragraphs, index)
+        if title_index is None:
+            continue
+        title_key = _canonical_structure_key(
+            paragraphs[title_index].text
+        )
+        if title_key:
+            chapters.append(
+                {
+                    "number": match.group("number"),
+                    "title_key": title_key,
+                    "title": paragraphs[title_index].text.strip(),
+                }
+            )
+    return chapters
+
+
+def _first_actual_heading_by_key(doc, expected_keys):
+    result = {}
+    for key, paragraph in _extract_structure_headings(
+        doc,
+        expected_keys=expected_keys,
+    ):
+        result.setdefault(key, paragraph)
+    return result
+
+
+def check_chapter_heading_layout_against_template(
+    doc,
+    template_path,
+    detailed_errors,
+    template_bytes=None,
+):
+    """Kiểm tra dòng CHƯƠNG n và tên chương phải nằm ở hai dòng riêng."""
+    template_doc = _load_template_document(
+        template_path=template_path,
+        template_bytes=template_bytes,
+    )
+    if template_doc is None:
+        return {"errors": 0}
+
+    expected_chapters = _template_chapter_layout(template_doc)
+    if not expected_chapters:
+        return {"errors": 0}
+
+    expected_keys = [item["title_key"] for item in expected_chapters]
+    actual_headings = _first_actual_heading_by_key(doc, expected_keys)
+    paragraphs = list(_all_document_paragraphs(doc))
+    paragraph_indices = {
+        paragraph._element: index
+        for index, paragraph in enumerate(paragraphs)
+    }
+    error_labels = []
+
+    for expected in expected_chapters:
+        title_paragraph = actual_headings.get(expected["title_key"])
+        if title_paragraph is None:
+            # Hàm kiểm tra cấu trúc đã báo thiếu tên chương.
+            continue
+
+        expected_marker = f"CHƯƠNG {expected['number']}"
+        title_text = title_paragraph.text.strip()
+        combined_match = CHAPTER_LINE_PATTERN.fullmatch(title_text)
+        marker_paragraph = None
+        marker_match = None
+
+        if combined_match:
+            marker_paragraph = title_paragraph
+            marker_match = combined_match
+        else:
+            title_index = paragraph_indices.get(title_paragraph._element)
+            previous_index = (
+                _previous_meaningful_paragraph_index(paragraphs, title_index)
+                if title_index is not None
+                else None
+            )
+            if previous_index is not None:
+                candidate = paragraphs[previous_index]
+                candidate_match = CHAPTER_LINE_PATTERN.fullmatch(
+                    candidate.text.strip()
+                )
+                if candidate_match:
+                    marker_paragraph = candidate
+                    marker_match = candidate_match
+
+        is_valid = bool(
+            marker_match
+            and marker_paragraph is not title_paragraph
+            and marker_match.group("label") == "CHƯƠNG"
+            and marker_match.group("number") == expected["number"]
+            and not marker_match.group("separator")
+            and not marker_match.group("title")
+            and marker_paragraph.text.strip() == expected_marker
+        )
+        if is_valid:
+            continue
+
+        _highlight_structure_paragraph(title_paragraph)
+        if marker_paragraph is not None:
+            _highlight_structure_paragraph(marker_paragraph)
+        error_labels.append(
+            f"{expected_marker} – {expected['title']}"
+        )
+
+    if error_labels:
+        detailed_errors.append(
+            "🟨 **Trình bày tiêu đề chương:** Phát hiện "
+            f"{len(error_labels)} chương chưa đúng template: "
+            + "; ".join(error_labels)
+            + ". Mỗi chương phải viết thành hai dòng; dòng thứ nhất chỉ "
+            "ghi 'CHƯƠNG n' (không có dấu chấm, dấu hai chấm hoặc tên "
+            "chương), dòng thứ hai mới ghi tên chương. Đã bôi vàng."
+        )
+    return {"errors": len(error_labels)}
+
+
+def _paragraph_starts_new_page(paragraphs, index):
+    paragraph = paragraphs[index]
+    xml = paragraph._element.xml
+    if (
+        paragraph.paragraph_format.page_break_before
+        or _paragraph_has_hard_page_break(paragraph)
+        or "lastRenderedPageBreak" in xml
+    ):
+        return True
+
+    # Ngắt trang/ngắt phần có thể nằm trong một đoạn rỗng ngay trước
+    # tiêu đề. Quét lùi đến đoạn có chữ gần nhất.
+    for previous_index in range(index - 1, max(-1, index - 8), -1):
+        previous = paragraphs[previous_index]
+        previous_xml = previous._element.xml
+        if (
+            _paragraph_has_hard_page_break(previous)
+            or "w:sectPr" in previous_xml
+        ):
+            return True
+        if previous.text.strip():
+            break
+    return False
+
+
+def _page_start_target_index(paragraphs, heading_index):
+    """Với chương, vị trí đầu trang là dòng CHƯƠNG n, không phải tên."""
+    paragraph = paragraphs[heading_index]
+    if CHAPTER_LINE_PATTERN.fullmatch(paragraph.text.strip()):
+        return heading_index
+    previous_index = _previous_meaningful_paragraph_index(
+        paragraphs,
+        heading_index,
+    )
+    if previous_index is not None and CHAPTER_LINE_PATTERN.fullmatch(
+        paragraphs[previous_index].text.strip()
+    ):
+        return previous_index
+    return heading_index
+
+
+def _template_required_page_start_keys(template_doc):
+    paragraphs = list(_all_document_paragraphs(template_doc))
+    indices = {
+        paragraph._element: index
+        for index, paragraph in enumerate(paragraphs)
+    }
+    required_keys = []
+    for key, paragraph in _extract_template_structure_headings(template_doc):
+        heading_index = indices.get(paragraph._element)
+        if heading_index is None:
+            continue
+        target_index = _page_start_target_index(paragraphs, heading_index)
+        if _paragraph_starts_new_page(paragraphs, target_index):
+            required_keys.append(key)
+    return required_keys
+
+
+def check_major_page_breaks_against_template(
+    doc,
+    template_path,
+    detailed_errors,
+    template_bytes=None,
+):
+    """Báo các mục lớn chưa bắt đầu ở trang mới như trong template."""
+    template_doc = _load_template_document(
+        template_path=template_path,
+        template_bytes=template_bytes,
+    )
+    if template_doc is None:
+        return {"missing_page_breaks": 0}
+
+    required_keys = _template_required_page_start_keys(template_doc)
+    actual_headings = _first_actual_heading_by_key(doc, required_keys)
+    paragraphs = list(_all_document_paragraphs(doc))
+    indices = {
+        paragraph._element: index
+        for index, paragraph in enumerate(paragraphs)
+    }
+    missing_labels = []
+
+    for key in required_keys:
+        heading = actual_headings.get(key)
+        if heading is None:
+            # Hàm kiểm tra cấu trúc đã báo mục bị thiếu.
+            continue
+        heading_index = indices.get(heading._element)
+        if heading_index is None:
+            continue
+        target_index = _page_start_target_index(paragraphs, heading_index)
+        if _paragraph_starts_new_page(paragraphs, target_index):
+            continue
+        target_paragraph = paragraphs[target_index]
+        target_paragraph.paragraph_format.page_break_before = True
+        _highlight_structure_paragraph(target_paragraph)
+        missing_labels.append(_structure_label(key))
+
+    if missing_labels:
+        detailed_errors.append(
+            "🟨 **Ngắt trang theo template:** Các mục phải bắt đầu ở "
+            "trang mới nhưng chưa có ngắt trang: "
+            + ", ".join(missing_labels)
+            + ". Phần mềm đã tự chèn Page Break và bôi vàng tiêu đề "
+            "tại các vị trí đã sửa."
+        )
+    return {"missing_page_breaks": len(missing_labels)}
 
 
 def _highlight_structure_paragraph(paragraph):
@@ -3334,6 +3744,7 @@ def process_docx_file(
     template_bytes=None,
     profile_label=None,
     regulation_filename=None,
+    profile_key=None,
 ):
     doc = docx.Document(io.BytesIO(uploaded_bytes))
     font_target = rules["font_name"]
@@ -3358,11 +3769,28 @@ def process_docx_file(
         detailed_errors.append(
             f"📘 **Hồ sơ được chọn:** {profile_label}{source_text}."
         )
+    check_cover_profile_against_selection(
+        doc,
+        profile_key,
+        detailed_errors,
+    )
     check_structure_against_template(
         doc,
         template_path,
         detailed_errors,
         font_target,
+        template_bytes=template_bytes,
+    )
+    check_chapter_heading_layout_against_template(
+        doc,
+        template_path,
+        detailed_errors,
+        template_bytes=template_bytes,
+    )
+    check_major_page_breaks_against_template(
+        doc,
+        template_path,
+        detailed_errors,
         template_bytes=template_bytes,
     )
     check_cover_pages_against_template(
@@ -3826,8 +4254,9 @@ def main():
 
     st.subheader("2. Tải file Word của học viên")
     st.caption(
-        "Hệ thống tự đối chiếu cấu trúc với đúng template và định dạng "
-        "với đúng PDF quy định của loại hồ sơ đã chọn."
+        "Hệ thống đọc loại hồ sơ trên bìa, đối chiếu cấu trúc với đúng "
+        "template và kiểm tra định dạng theo đúng PDF quy định của loại "
+        "hồ sơ đã chọn."
     )
     uploaded_docx = st.file_uploader(
         "Thả file .docx vào đây",
@@ -3892,6 +4321,7 @@ def main():
                         uploaded_docx.getvalue(),
                         active_rules,
                         template_path=template_path,
+                        profile_key=profile_key,
                         profile_label=profile["label"],
                         regulation_filename=(
                             profile["resolved_regulation_file"]
