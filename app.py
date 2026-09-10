@@ -2228,6 +2228,14 @@ def _paragraph_has_explicit_image_source(paragraph):
     if not text:
         return _paragraph_has_superscript_citation(paragraph)
 
+    # Không được hiểu câu mô tả/cảnh báo phủ định là một dòng nguồn.
+    if re.search(
+        r"(?i)\b(?:không|chưa)\s+(?:(?:có|ghi|nêu|bổ\s+sung)\s+)?"
+        r"(?:trích\s+dẫn\s+)?nguồn\b|\bthiếu\s+(?:trích\s+dẫn\s+)?nguồn\b",
+        text,
+    ):
+        return False
+
     explicit_source_patterns = [
         r"(?i)\bnguồn\b",
         r"(?i)\bsource\b",
@@ -2253,6 +2261,153 @@ def _paragraph_is_image_caption(paragraph):
             paragraph.text,
         )
     )
+
+
+def _paragraph_is_subfigure_label(paragraph):
+    """Nhận các nhãn A, B, C... đặt giữa nhóm ảnh và chú thích."""
+    return bool(
+        re.fullmatch(
+            r"(?i)\s*(?:\(?[A-H]\)?[.):]?)(?:\s+\(?[A-H]\)?[.):]?)*\s*",
+            paragraph.text,
+        )
+    )
+
+
+def _paragraph_starts_new_image_context(paragraph):
+    """Nhận ranh giới nội dung thật, không phụ thuộc style Word bị gán sai."""
+    text = paragraph.text.strip()
+    if not text:
+        return False
+    if re.match(
+        r"(?i)^(?:CHƯƠNG|CHAPTER|PHẦN|MỤC)\s+"
+        r"(?:\d+|[IVXLCDM]+)\b",
+        text,
+    ):
+        return True
+    if re.match(r"^\d+(?:\.\d+)+\.?\s+\S", text) and len(text) <= 250:
+        return True
+    return _is_all_caps_heading(text)
+
+
+def _paragraph_has_page_boundary_marker(paragraph):
+    """Nhận dấu sang trang/ngắt phần nằm giữa hình và dòng nguồn."""
+    xml = paragraph._element.xml
+    return bool(
+        paragraph.paragraph_format.page_break_before
+        or _paragraph_has_hard_page_break(paragraph)
+        or "lastRenderedPageBreak" in xml
+        or "w:sectPr" in xml
+    )
+
+
+def _image_caption_and_source_context(
+    paragraphs,
+    image_index,
+    max_forward_paragraphs=24,
+):
+    """Ghép hình với chú thích/nguồn phía dưới, kể cả khi nguồn sang trang.
+
+    Vùng quét được mở rộng qua các đoạn rỗng, dấu ngắt trang và một nhóm
+    ảnh liên tiếp. Việc quét dừng khi gặp đoạn nội dung, tiêu đề hoặc một
+    hình mới sau chú thích để không lấy nhầm nguồn của đối tượng kế tiếp.
+    """
+    context = [paragraphs[image_index]]
+    caption_paragraphs = []
+    source_paragraph = None
+    source_index = None
+    detail_paragraph_count = 0
+
+    # Một số file đặt ảnh và chú thích/nguồn trong cùng một đoạn.
+    if _paragraph_is_image_caption(paragraphs[image_index]):
+        caption_paragraphs.append(paragraphs[image_index])
+    if _paragraph_has_explicit_image_source(paragraphs[image_index]):
+        source_paragraph = paragraphs[image_index]
+        source_index = image_index
+
+    # Giữ khả năng nhận chú thích đặt ngay phía trên hình.
+    previous_index = image_index - 1
+    while previous_index >= 0 and not paragraphs[
+        previous_index
+    ].text.strip():
+        previous_index -= 1
+    if (
+        previous_index >= 0
+        and _paragraph_is_image_caption(paragraphs[previous_index])
+    ):
+        context.insert(0, paragraphs[previous_index])
+        caption_paragraphs.append(paragraphs[previous_index])
+
+    seen_caption_below = False
+    scan_end = min(
+        len(paragraphs),
+        image_index + max_forward_paragraphs + 1,
+    )
+    for candidate_index in range(image_index + 1, scan_end):
+        candidate = paragraphs[candidate_index]
+        text = candidate.text.strip()
+
+        if IMAGE_WARNING_PARAGRAPH_PATTERN.search(candidate.text):
+            continue
+        if not text:
+            # Đoạn rỗng có Page Break là tình huống nguồn bị đẩy sang
+            # đầu trang sau; vẫn tiếp tục tìm theo thứ tự nội dung.
+            continue
+        is_caption = _paragraph_is_image_caption(candidate)
+        is_source = _paragraph_has_explicit_image_source(candidate)
+        if is_caption:
+            if caption_paragraphs:
+                # Chú thích thứ hai thường thuộc hình kế tiếp.
+                break
+            context.append(candidate)
+            caption_paragraphs.append(candidate)
+            seen_caption_below = True
+            # Chấp nhận dạng "Hình 1... Nguồn: ..." trên cùng một dòng.
+            if is_source:
+                source_paragraph = candidate
+                source_index = candidate_index
+                break
+            continue
+        if is_source:
+            context.append(candidate)
+            source_paragraph = candidate
+            source_index = candidate_index
+            break
+        if has_image(candidate):
+            # Cho phép nhiều ảnh liên tiếp dùng chung một chú thích/nguồn.
+            context.append(candidate)
+            continue
+
+        if _paragraph_is_subfigure_label(candidate):
+            context.append(candidate)
+            continue
+
+        if (
+            caption_paragraphs
+            and detail_paragraph_count < 4
+            and not _paragraph_starts_new_image_context(candidate)
+        ):
+            # Chấp nhận một vài dòng giải thích A/B/C giữa chú thích và
+            # dòng nguồn; dạng này rất thường gặp với nhóm ảnh lâm sàng.
+            context.append(candidate)
+            detail_paragraph_count += 1
+            continue
+
+        # Mọi đoạn chữ thông thường hoặc tiêu đề đều kết thúc vùng của
+        # hình hiện tại. Nhờ vậy nguồn của hình/bảng sau không bị lấy nhầm.
+        break
+
+    source_crossed_page = False
+    if source_index is not None and source_index > image_index:
+        source_crossed_page = any(
+            _paragraph_has_page_boundary_marker(paragraphs[index])
+            for index in range(image_index + 1, source_index + 1)
+        )
+    return {
+        "paragraphs": context,
+        "caption_paragraphs": caption_paragraphs,
+        "source_paragraph": source_paragraph,
+        "source_crossed_page": source_crossed_page,
+    }
 
 
 def _insert_image_warning(doc, image_paragraph, warning_text, font_target):
@@ -2462,6 +2617,7 @@ def check_image_citations(
     missing_source_count = 0
     missing_caption_count = 0
     skipped_cover_image_count = 0
+    source_across_page_count = 0
 
     for index, paragraph in enumerate(paragraphs):
         if not has_image(paragraph):
@@ -2483,24 +2639,14 @@ def check_image_citations(
         start_index = max(0, index - 1)
         end_index = min(len(paragraphs), index + 4)
         nearby_paragraphs = paragraphs[start_index:end_index]
-        source_paragraphs = paragraphs[index:end_index]
-        if (
-            index > 0
-            and _paragraph_is_image_caption(paragraphs[index - 1])
-        ):
-            source_paragraphs = [
-                paragraphs[index - 1],
-                *source_paragraphs,
-            ]
-
-        has_caption = any(
-            _paragraph_is_image_caption(item)
-            for item in nearby_paragraphs
+        image_context = _image_caption_and_source_context(
+            paragraphs,
+            index,
         )
-        has_source = any(
-            _paragraph_has_explicit_image_source(item)
-            for item in source_paragraphs
-        )
+        has_caption = bool(image_context["caption_paragraphs"])
+        has_source = image_context["source_paragraph"] is not None
+        if has_source and image_context["source_crossed_page"]:
+            source_across_page_count += 1
 
         caption_ok = has_caption or not require_caption
         source_ok = has_source or not require_source
@@ -2545,6 +2691,12 @@ def check_image_citations(
             "🟨 **Kiểm tra chú thích hình:** Phát hiện "
             f"{missing_caption_count} hình thiếu tên/chú thích."
         )
+    if source_across_page_count:
+        detailed_errors.append(
+            "🔗 **Nguồn hình sang trang:** Đã nhận diện đúng "
+            f"{source_across_page_count} hình có dòng nguồn ở trang kế "
+            "tiếp; các hình này không bị báo thiếu nguồn."
+        )
     if skipped_cover_image_count:
         detailed_errors.append(
             "🏫 **Logo/trang bìa:** Đã bỏ qua "
@@ -2561,6 +2713,7 @@ def check_image_citations(
         "missing_caption": missing_caption_count,
         "skipped_cover_images": skipped_cover_image_count,
         "removed_previous_warnings": removed_warning_count,
+        "source_across_page": source_across_page_count,
     }
 
 
@@ -2893,6 +3046,44 @@ PROFILE_COVER_LABELS = {
 }
 
 
+PROFILE_TEMPLATE_WARNING_PATTERN = re.compile(
+    r"^\s*(?:⚠️\s*)?\[CẢNH BÁO NHẦM TEMPLATE\]\s*:",
+    re.IGNORECASE,
+)
+
+
+def _remove_previous_profile_template_warnings(doc):
+    """Xóa ghi chú nhầm template do lần kiểm tra trước tạo ra."""
+    removed_count = 0
+    for paragraph in list(_all_document_paragraphs(doc)):
+        if not PROFILE_TEMPLATE_WARNING_PATTERN.search(paragraph.text):
+            continue
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+            removed_count += 1
+    return removed_count
+
+
+def _insert_first_page_template_warning(doc, warning_text, font_target=None):
+    """Chèn cảnh báo bôi vàng ở đầu trang bìa thứ nhất."""
+    if doc.paragraphs:
+        warning_paragraph = doc.paragraphs[0].insert_paragraph_before()
+    else:
+        warning_paragraph = doc.add_paragraph()
+    warning_paragraph.paragraph_format.space_after = Pt(3)
+    warning_paragraph.paragraph_format.keep_with_next = True
+    warning_run = warning_paragraph.add_run(
+        "⚠️ [CẢNH BÁO NHẦM TEMPLATE]: " + warning_text
+    )
+    warning_run.bold = True
+    warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    if font_target:
+        warning_run.font.name = font_target
+        warning_run.font.size = Pt(11)
+    return warning_paragraph
+
+
 def _cover_profile_evidence(doc):
     """Đọc loại hồ sơ và định hướng đào tạo ghi trên hai trang bìa."""
     paragraphs = list(_all_document_paragraphs(doc))
@@ -2963,8 +3154,10 @@ def check_cover_profile_against_selection(
     doc,
     profile_key,
     detailed_errors,
+    font_target=None,
 ):
     """Cảnh báo khi loại hồ sơ trên bìa không khớp template đã chọn."""
+    removed_warning_count = _remove_previous_profile_template_warnings(doc)
     if profile_key not in PROFILE_COVER_LABELS:
         return {"detected_key": None, "matches": None}
 
@@ -2976,6 +3169,12 @@ def check_cover_profile_against_selection(
     if len(evidence["directions"]) > 1:
         for paragraph in evidence_paragraphs:
             _highlight_structure_paragraph(paragraph)
+        _insert_first_page_template_warning(
+            doc,
+            "Bìa đang ghi đồng thời định hướng ứng dụng và định hướng "
+            f"nghiên cứu. Hồ sơ phải dùng đúng {expected_label}.",
+            font_target,
+        )
         detailed_errors.append(
             "🟨 **Loại hồ sơ trên bìa không thống nhất:** Bìa có đồng "
             "thời nội dung 'định hướng ứng dụng' và 'định hướng nghiên "
@@ -2987,6 +3186,12 @@ def check_cover_profile_against_selection(
     if detected_key is None:
         for paragraph in evidence_paragraphs:
             _highlight_structure_paragraph(paragraph)
+        _insert_first_page_template_warning(
+            doc,
+            "Không xác định được loại hồ sơ trên bìa. Cần ghi rõ loại "
+            f"hồ sơ và sử dụng đúng {expected_label}.",
+            font_target,
+        )
         detailed_errors.append(
             "🟨 **Không xác định được loại hồ sơ trên bìa:** Bìa phải "
             "ghi rõ là luận văn/đề cương và định hướng nghiên cứu/ứng "
@@ -2999,19 +3204,36 @@ def check_cover_profile_against_selection(
     if detected_key != profile_key:
         for paragraph in evidence_paragraphs:
             _highlight_structure_paragraph(paragraph)
+        _insert_first_page_template_warning(
+            doc,
+            f"Hồ sơ trên bìa là {detected_label}, nhưng đang chọn và "
+            f"đối chiếu theo {expected_label}. Cần chọn đúng loại hồ sơ "
+            "hoặc trình bày lại theo đúng template của đối tượng.",
+            font_target,
+        )
         detailed_errors.append(
             "🟨 **Bìa không khớp loại hồ sơ đã chọn:** Bìa được nhận "
             f"diện là {detected_label}, nhưng phần mềm đang đối chiếu "
             f"theo {expected_label}. Đã bôi vàng các dòng loại hồ sơ; "
             "cần chọn đúng loại hoặc sửa lại bìa."
         )
-        return {"detected_key": detected_key, "matches": False}
+        return {
+            "detected_key": detected_key,
+            "matches": False,
+            "first_page_warning": True,
+            "removed_previous_warnings": removed_warning_count,
+        }
 
     detailed_errors.append(
         f"✅ **Loại hồ sơ trên bìa:** {detected_label}; khớp với "
         "template và quy định đang được áp dụng."
     )
-    return {"detected_key": detected_key, "matches": True}
+    return {
+        "detected_key": detected_key,
+        "matches": True,
+        "first_page_warning": False,
+        "removed_previous_warnings": removed_warning_count,
+    }
 
 
 CHAPTER_LINE_PATTERN = re.compile(
@@ -3022,12 +3244,19 @@ CHAPTER_LINE_PATTERN = re.compile(
 )
 
 
+PAGE_BREAK_WARNING_PATTERN = re.compile(
+    r"^\s*(?:⚠️\s*)?\[CẢNH BÁO NGẮT TRANG\]\s*:",
+    re.IGNORECASE,
+)
+
+
 def _is_generated_checker_warning(paragraph):
     text = paragraph.text
     return bool(
         STRUCTURE_WARNING_PARAGRAPH_PATTERN.search(text)
+        or PROFILE_TEMPLATE_WARNING_PATTERN.search(text)
         or IMAGE_WARNING_PARAGRAPH_PATTERN.search(text)
-        or "[CẢNH BÁO NGẮT TRANG]" in text.upper()
+        or PAGE_BREAK_WARNING_PATTERN.search(text)
         or "[CẢNH BÁO TIÊU ĐỀ CHƯƠNG]" in text.upper()
     )
 
@@ -3182,13 +3411,21 @@ def check_chapter_heading_layout_against_template(
     return {"errors": len(error_labels)}
 
 
-def _paragraph_starts_new_page(paragraphs, index):
+def _paragraph_starts_new_page(
+    paragraphs,
+    index,
+    allow_rendered_page_break=False,
+):
+    """Kiểm tra ngắt trang thật; dấu dàn trang cũ chỉ dùng cho template."""
     paragraph = paragraphs[index]
     xml = paragraph._element.xml
     if (
         paragraph.paragraph_format.page_break_before
         or _paragraph_has_hard_page_break(paragraph)
-        or "lastRenderedPageBreak" in xml
+        or (
+            allow_rendered_page_break
+            and "lastRenderedPageBreak" in xml
+        )
     ):
         return True
 
@@ -3229,15 +3466,77 @@ def _template_required_page_start_keys(template_doc):
         paragraph._element: index
         for index, paragraph in enumerate(paragraphs)
     }
+    template_headings = _extract_template_structure_headings(template_doc)
+    template_keys = [key for key, _ in template_headings]
+    mandatory_keys = {
+        item["title_key"] for item in _template_chapter_layout(template_doc)
+    }
+    # Đây là các mục luôn phải bắt đầu ở trang mới, kể cả khi Word chỉ
+    # dàn trang tự động và không lưu Page Break trong chính template.
+    mandatory_keys.update(
+        key for key in ("KET LUAN", "KIEN NGHI") if key in template_keys
+    )
+
     required_keys = []
-    for key, paragraph in _extract_template_structure_headings(template_doc):
+    for key, paragraph in template_headings:
         heading_index = indices.get(paragraph._element)
         if heading_index is None:
             continue
         target_index = _page_start_target_index(paragraphs, heading_index)
-        if _paragraph_starts_new_page(paragraphs, target_index):
+        if (
+            key in mandatory_keys
+            or _paragraph_starts_new_page(
+                paragraphs,
+                target_index,
+                allow_rendered_page_break=True,
+            )
+        ):
             required_keys.append(key)
     return required_keys
+
+
+def _remove_previous_page_break_warnings(doc):
+    removed_count = 0
+    for paragraph in list(_all_document_paragraphs(doc)):
+        if not PAGE_BREAK_WARNING_PATTERN.search(paragraph.text):
+            continue
+        parent = paragraph._element.getparent()
+        if parent is not None:
+            parent.remove(paragraph._element)
+            removed_count += 1
+    return removed_count
+
+
+def _paragraph_is_in_text_box(paragraph):
+    parent = paragraph._p.getparent()
+    while parent is not None:
+        if str(parent.tag).endswith("}txbxContent"):
+            return True
+        parent = parent.getparent()
+    return False
+
+
+def _insert_page_break_warning(
+    target_paragraph,
+    label,
+    font_target=None,
+    reason=None,
+):
+    warning_paragraph = target_paragraph.insert_paragraph_before()
+    warning_paragraph.paragraph_format.keep_with_next = True
+    warning_paragraph.paragraph_format.space_after = Pt(3)
+    reason_text = f" ({reason})" if reason else ""
+    warning_run = warning_paragraph.add_run(
+        "⚠️ [CẢNH BÁO NGẮT TRANG]: "
+        f"Mục {label} phải bắt đầu ở trang mới{reason_text}. "
+        "Hãy đặt con trỏ trước tiêu đề và nhấn Ctrl+Enter."
+    )
+    warning_run.bold = True
+    warning_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    if font_target:
+        warning_run.font.name = font_target
+        warning_run.font.size = Pt(11)
+    return warning_paragraph
 
 
 def check_major_page_breaks_against_template(
@@ -3245,14 +3544,16 @@ def check_major_page_breaks_against_template(
     template_path,
     detailed_errors,
     template_bytes=None,
+    font_target=None,
 ):
-    """Báo các mục lớn chưa bắt đầu ở trang mới như trong template."""
+    """Bắt buộc chương, Kết luận và Kiến/Khuyến nghị sang trang."""
+    removed_warning_count = _remove_previous_page_break_warnings(doc)
     template_doc = _load_template_document(
         template_path=template_path,
         template_bytes=template_bytes,
     )
     if template_doc is None:
-        return {"missing_page_breaks": 0}
+        return {"missing_page_breaks": 0, "locked_page_breaks": 0}
 
     required_keys = _template_required_page_start_keys(template_doc)
     actual_headings = _first_actual_heading_by_key(doc, required_keys)
@@ -3261,8 +3562,19 @@ def check_major_page_breaks_against_template(
         paragraph._element: index
         for index, paragraph in enumerate(paragraphs)
     }
-    missing_labels = []
+    target_records = []
+    target_elements = set()
 
+    def add_target(target_index, label):
+        if target_index is None or not (0 <= target_index < len(paragraphs)):
+            return
+        target = paragraphs[target_index]
+        if target._element in target_elements:
+            return
+        target_elements.add(target._element)
+        target_records.append((target_index, target, label))
+
+    # Các mục lớn được lấy từ đúng template đang áp dụng.
     for key in required_keys:
         heading = actual_headings.get(key)
         if heading is None:
@@ -3271,13 +3583,70 @@ def check_major_page_breaks_against_template(
         heading_index = indices.get(heading._element)
         if heading_index is None:
             continue
-        target_index = _page_start_target_index(paragraphs, heading_index)
-        if _paragraph_starts_new_page(paragraphs, target_index):
+        add_target(
+            _page_start_target_index(paragraphs, heading_index),
+            _structure_label(key),
+        )
+
+    # Luôn quét trực tiếp mọi dòng CHƯƠNG trong hồ sơ. Nhờ vậy vẫn ngắt
+    # được khi học viên viết gộp "CHƯƠNG 1: TỔNG QUAN" và hàm nhận tên
+    # chương chưa thể ghép dòng đó với tiêu đề trong template.
+    for index, paragraph in enumerate(paragraphs):
+        if _is_toc_paragraph(paragraph):
             continue
-        target_paragraph = paragraphs[target_index]
-        target_paragraph.paragraph_format.page_break_before = True
+        match = CHAPTER_LINE_PATTERN.fullmatch(paragraph.text.strip())
+        if match:
+            add_target(index, f"Chương {match.group('number')}")
+
+    target_records.sort(key=lambda item: item[0])
+    missing_labels = []
+    locked_labels = []
+    manual_warning_labels = []
+
+    for _, target_paragraph, label in target_records:
+        had_real_page_break = _paragraph_starts_new_page(
+            paragraphs,
+            indices[target_paragraph._element],
+            allow_rendered_page_break=False,
+        )
+
+        # Luôn khóa bằng Page Break Before ngay trên tiêu đề. Cách này vẫn
+        # ổn định sau khi Word tính toán lại số trang, khác với dấu
+        # lastRenderedPageBreak chỉ ghi nhận lần dàn trang trước.
+        set_error = None
+        if not target_paragraph.paragraph_format.page_break_before:
+            try:
+                target_paragraph.paragraph_format.page_break_before = True
+            except Exception as exc:
+                set_error = str(exc)
+            else:
+                if target_paragraph.paragraph_format.page_break_before:
+                    locked_labels.append(label)
+                else:
+                    set_error = "Word không lưu được thuộc tính Page Break"
+
+        unreliable_container = bool(
+            _paragraph_is_in_table(target_paragraph)
+            or _paragraph_is_in_text_box(target_paragraph)
+        )
+        if set_error or unreliable_container:
+            reason = (
+                "tiêu đề đang nằm trong bảng hoặc hộp văn bản"
+                if unreliable_container
+                else "không thể chèn ngắt trang tự động"
+            )
+            _insert_page_break_warning(
+                target_paragraph,
+                label,
+                font_target=font_target,
+                reason=reason,
+            )
+            manual_warning_labels.append(label)
+
+        if had_real_page_break:
+            continue
         _highlight_structure_paragraph(target_paragraph)
-        missing_labels.append(_structure_label(key))
+        missing_labels.append(label)
 
     if missing_labels:
         detailed_errors.append(
@@ -3287,7 +3656,32 @@ def check_major_page_breaks_against_template(
             + ". Phần mềm đã tự chèn Page Break và bôi vàng tiêu đề "
             "tại các vị trí đã sửa."
         )
-    return {"missing_page_breaks": len(missing_labels)}
+    if locked_labels:
+        detailed_errors.append(
+            "📄 **Khóa ngắt trang các mục lớn:** Đã đặt Page Break "
+            f"Before cố định cho {len(locked_labels)} mục, bao gồm các "
+            "chương và Kết luận/Kiến nghị hoặc Khuyến nghị; nội dung "
+            "phía trước thay đổi cũng không kéo các mục này lên trang cũ."
+        )
+    if manual_warning_labels:
+        detailed_errors.append(
+            "🟨 **Vị trí cần ngắt trang thủ công:** Không thể bảo đảm "
+            "ngắt trang tự động tại "
+            + ", ".join(manual_warning_labels)
+            + ". Đã chèn ghi chú bôi vàng ngay trước tiêu đề; đặt con "
+            "trỏ tại đó và nhấn Ctrl+Enter."
+        )
+    if removed_warning_count:
+        detailed_errors.append(
+            "🧹 **Cảnh báo ngắt trang cũ:** Đã xóa "
+            f"{removed_warning_count} ghi chú cũ và kiểm tra lại."
+        )
+    return {
+        "missing_page_breaks": len(missing_labels),
+        "locked_page_breaks": len(locked_labels),
+        "manual_page_break_warnings": len(manual_warning_labels),
+        "removed_previous_warnings": removed_warning_count,
+    }
 
 
 def _highlight_structure_paragraph(paragraph):
@@ -3790,6 +4184,7 @@ def process_docx_file(
         doc,
         profile_key,
         detailed_errors,
+        font_target=font_target,
     )
     check_structure_against_template(
         doc,
@@ -3809,6 +4204,7 @@ def process_docx_file(
         template_path,
         detailed_errors,
         template_bytes=template_bytes,
+        font_target=font_target,
     )
     check_cover_pages_against_template(
         doc,
