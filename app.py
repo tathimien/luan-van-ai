@@ -2273,6 +2273,28 @@ def _paragraph_is_subfigure_label(paragraph):
     )
 
 
+def _paragraph_is_subfigure_description(paragraph):
+    """Nhận dòng mô tả chung kiểu ``A. ... B. ...`` của nhóm ảnh."""
+    text = paragraph.text.strip()
+    if not text or len(text) > 500:
+        return False
+    panel_markers = re.findall(
+        r"(?i)(?<![A-Za-zÀ-ỹĐđ])\(?[A-H]\)?[.):](?=\s*\S)",
+        text,
+    )
+    return bool(panel_markers)
+
+
+def _paragraph_table_ancestor(paragraph):
+    """Trả về bảng chứa đoạn văn, hoặc ``None`` nếu đoạn ở ngoài bảng."""
+    parent = paragraph._p.getparent()
+    while parent is not None:
+        if str(parent.tag).endswith("}tbl"):
+            return parent
+        parent = parent.getparent()
+    return None
+
+
 def _paragraph_starts_new_image_context(paragraph):
     """Nhận ranh giới nội dung thật, không phụ thuộc style Word bị gán sai."""
     text = paragraph.text.strip()
@@ -2303,19 +2325,20 @@ def _paragraph_has_page_boundary_marker(paragraph):
 def _image_caption_and_source_context(
     paragraphs,
     image_index,
-    max_forward_paragraphs=24,
+    max_forward_paragraphs=80,
 ):
     """Ghép hình với chú thích/nguồn phía dưới, kể cả khi nguồn sang trang.
 
-    Vùng quét được mở rộng qua các đoạn rỗng, dấu ngắt trang và một nhóm
-    ảnh liên tiếp. Việc quét dừng khi gặp đoạn nội dung, tiêu đề hoặc một
-    hình mới sau chú thích để không lấy nhầm nguồn của đối tượng kế tiếp.
+    Vùng quét được mở rộng qua các đoạn rỗng, dấu ngắt trang, các ô của
+    cùng bảng và một nhóm ảnh liên tiếp. Việc quét dừng khi gặp tiêu đề
+    nội dung hoặc chú thích của hình kế tiếp để không lấy nhầm nguồn.
     """
     context = [paragraphs[image_index]]
     caption_paragraphs = []
     source_paragraph = None
     source_index = None
     detail_paragraph_count = 0
+    image_table = _paragraph_table_ancestor(paragraphs[image_index])
 
     # Một số file đặt ảnh và chú thích/nguồn trong cùng một đoạn.
     if _paragraph_is_image_caption(paragraphs[image_index]):
@@ -2378,6 +2401,22 @@ def _image_caption_and_source_context(
             continue
 
         if _paragraph_is_subfigure_label(candidate):
+            context.append(candidate)
+            continue
+
+        if _paragraph_is_subfigure_description(candidate):
+            # Ví dụ: "A. Ống Monoka. B. Ống hai đầu có que thông" nằm
+            # ở hàng cuối bảng, trước chú thích/nguồn chung ngoài bảng.
+            context.append(candidate)
+            continue
+
+        candidate_table = _paragraph_table_ancestor(candidate)
+        if image_table is not None and candidate_table is image_table:
+            # Ảnh trong các ô khác nhau của cùng một bảng thường dùng
+            # chung một chú thích và một dòng nguồn đặt sau bảng, thậm
+            # chí ở đầu trang kế tiếp. Đi hết các ô của chính bảng đó.
+            if _paragraph_starts_new_image_context(candidate):
+                break
             context.append(candidate)
             continue
 
