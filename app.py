@@ -1,3 +1,67 @@
+        "Loại hồ sơ",
+        options=list(DOCUMENT_PROFILES),
+        format_func=lambda key: DOCUMENT_PROFILES[key]["label"],
+        help=(
+            "Mỗi lựa chọn được gắn cố định với một template Word và một "
+            "file quy định PDF tương ứng."
+        ),
+    )
+    profile = resolve_profile_paths(
+        app_directory,
+        DOCUMENT_PROFILES[profile_key],
+    )
+    template_path = profile["template_path"]
+    regulation_path = profile["regulation_path"]
+
+    template_exists = os.path.isfile(template_path)
+    regulation_exists = os.path.isfile(regulation_path)
+    parsed_rules = _copy_default_rules()
+    pdf_text = ""
+
+    if regulation_exists:
+        pdf_text, parsed_rules = load_rules_for_pdf(
+            regulation_path,
+            os.path.getmtime(regulation_path),
+            api_key,
+        )
+
+    left_status, right_status = st.columns(2)
+    with left_status:
+        if template_exists:
+            st.success(
+                f"✅ Template: {profile['resolved_template_file']}"
+            )
+        else:
+            st.error(f"❌ Thiếu template: {profile['template_file']}")
+    with right_status:
+        if regulation_exists and pdf_text:
+            st.success(
+                f"✅ Quy định: {profile['resolved_regulation_file']}"
+            )
+        elif regulation_exists:
+            st.error("❌ PDF quy định không có lớp chữ để đọc.")
+        else:
+            st.error(f"❌ Thiếu quy định: {profile['regulation_file']}")
+
+    if regulation_exists and pdf_text:
+        with st.expander("📌 Quy định đang được áp dụng", expanded=False):
+            allowed_sizes = parsed_rules.get(
+                "allowed_font_sizes",
+                [parsed_rules.get("font_size", 13.0)],
+            )
+            allowed_sizes_text = ", ".join(
+                f"{float(value):g}" for value in allowed_sizes
+            )
+            st.markdown(
+                f"**Font:** {parsed_rules.get('font_name')} | "
+                f"**Cỡ:** {allowed_sizes_text} pt | "
+                f"**Giãn dòng:** {parsed_rules.get('line_spacing')} | "
+                "**Thụt đầu dòng:** "
+                f"{parsed_rules.get('first_line_indent', 1.0)} cm"
+            )
+            st.markdown(
+                "**Lề trái – phải – trên – dưới:** "
+                f"{parsed_rules.get('margin_left')} – "
                 f"{parsed_rules.get('margin_right')} – "
                 f"{parsed_rules.get('margin_top')} – "
                 f"{parsed_rules.get('margin_bottom')} cm"
