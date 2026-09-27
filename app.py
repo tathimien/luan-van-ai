@@ -1,96 +1,117 @@
-import difflib
-import copy
-import io
-import json
-import os
-import re
-import unicodedata
-from collections import Counter
+                f"{parsed_rules.get('margin_right')} – "
+                f"{parsed_rules.get('margin_top')} – "
+                f"{parsed_rules.get('margin_bottom')} cm"
+            )
+            st.markdown(
+                f"**Kiểu trích dẫn:** "
+                f"{parsed_rules.get('citation_style', 'keep')}"
+            )
+            for requirement in parsed_rules.get(
+                "detailed_requirements",
+                [],
+            ):
+                st.markdown(f"- {requirement}")
 
-import docx
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
-from docx.oxml.text.paragraph import CT_P
-from docx.shared import Cm, Pt
-from docx.text.paragraph import Paragraph
-from pypdf import PdfReader
+    st.subheader("2. Tải file Word của học viên")
+    st.caption(
+        "Hệ thống đọc loại hồ sơ trên bìa, đối chiếu cấu trúc với đúng "
+        "template và kiểm tra định dạng theo đúng PDF quy định của loại "
+        "hồ sơ đã chọn."
+    )
+    uploaded_docx = st.file_uploader(
+        "Thả file .docx vào đây",
+        type=["docx"],
+        key=f"uploaded_document_{profile_key}",
+    )
 
-try:
-    import streamlit as st
-except ImportError:
-    st = None
+    st.sidebar.title("📄 Template mẫu đang chọn")
+    st.sidebar.info(profile["label"])
+    if template_exists:
+        with open(template_path, "rb") as template_file:
+            bundled_template_bytes = template_file.read()
+        st.sidebar.download_button(
+            label="📥 TẢI ĐÚNG TEMPLATE WORD MẪU",
+            data=bundled_template_bytes,
+            file_name=profile["resolved_template_file"],
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.sidebar.error("Template của loại hồ sơ này chưa được cài đặt.")
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
+    st.sidebar.markdown("---")
+    st.sidebar.title("⚙️ Cặp tệp hệ thống")
+    st.sidebar.markdown(
+        f"**Template:** `{profile['resolved_template_file']}`"
+    )
+    st.sidebar.markdown(
+        f"**Quy định:** `{profile['resolved_regulation_file']}`"
+    )
+    st.sidebar.caption(
+        "Học viên không thể thay đổi cặp tệp này. Quản trị viên cập nhật "
+        "tệp trong thư mục template và quy_dinh."
+    )
 
-try:
-    import google.generativeai as genai_legacy
-except ImportError:
-    genai_legacy = None
+    active_rules = copy.deepcopy(parsed_rules)
+    profile_ready = template_exists and regulation_exists and bool(pdf_text)
+
+    st.markdown("---")
+    if st.button(
+        "🔍 KIỂM TRA THEO ĐÚNG LOẠI HỒ SƠ",
+        type="primary",
+        use_container_width=True,
+    ):
+        if not profile_ready:
+            st.error(
+                "❌ Chưa thể kiểm tra vì cặp template/quy định của loại "
+                "hồ sơ này chưa đầy đủ hoặc PDF chưa đọc được. Vui lòng "
+                "liên hệ quản trị viên."
+            )
+        elif not uploaded_docx:
+            st.error("❌ Vui lòng tải file Word (.docx) ở bước 2.")
+        else:
+            try:
+                with st.spinner(
+                    "⏳ Đang đối chiếu template, quy định và đánh dấu màu..."
+                ):
+                    fixed_stream, error_list = process_docx_file(
+                        uploaded_docx.getvalue(),
+                        active_rules,
+                        template_path=template_path,
+                        profile_key=profile_key,
+                        profile_label=profile["label"],
+                        regulation_filename=(
+                            profile["resolved_regulation_file"]
+                        ),
+                    )
+            except Exception as exc:
+                st.error(f"❌ Không thể xử lý file Word: {exc}")
+            else:
+                st.markdown(
+                    "### 📋 BÁO CÁO KẾT QUẢ KIỂM TRA VÀ SỬA LỖI"
+                )
+                for error in error_list:
+                    st.write(error)
+                st.success(
+                    "🎉 Đã hoàn thành. Các vị trí cần rà soát được bôi "
+                    "vàng hoặc đỏ trong file Word."
+                )
+                st.download_button(
+                    label="📥 TẢI FILE ĐÃ KIỂM TRA VÀ HIGHLIGHT",
+                    data=fixed_stream,
+                    file_name=checked_output_filename(
+                        uploaded_docx.name
+                    ),
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "wordprocessingml.document"
+                    ),
+                    use_container_width=True,
+                )
 
 
-DEFAULT_RULES = {
-    "font_name": "Times New Roman",
-    "font_size": 13.0,
-    # Luận văn được phép dùng thống nhất cỡ 13 hoặc cỡ 14.
-    "allowed_font_sizes": [13.0, 14.0],
-    "line_spacing": 1.5,
-    "first_line_indent": 1.0,
-    "margin_top": 3.5,
-    "margin_bottom": 3.0,
-    "margin_left": 3.5,
-    "margin_right": 2.0,
-    # Các khóa dưới đây quyết định những kiểm tra nghiệp vụ nào được chạy.
-    # File PDF có thể ghi đè các giá trị này sau khi được đọc.
-    "citation_style": "numeric_superscript",
-    "require_image_source": True,
-    "require_image_caption": True,
-    "check_abbreviations": True,
-    "check_subjectless_sentences": True,
-    "normalize_references": True,
-    "detailed_requirements": [
-        "Bảng mã Unicode; Times New Roman cỡ 13 hoặc 14; giãn dòng 1,5; "
-        "đoạn văn nội dung thụt đầu dòng 1,0 cm.",
-        "Lề trên 3,5 cm; dưới 3,0 cm; trái 3,5 cm; phải 2,0 cm.",
-        "Tài liệu tham khảo: tên Việt Nam viết đầy đủ; tên nước ngoài "
-        "ghi họ đầy đủ, tên đệm/tên gọi viết tắt; trên 3 tác giả ghi 3 "
-        "tác giả đầu và cộng sự/et al.; năm trong ngoặc; tên bài in "
-        "đứng; tên tạp chí in nghiêng; tập/số in đậm; trang chỉ ghi số.",
-    ],
-}
-
-
-# Mỗi lựa chọn luôn gắn với đúng MỘT template và MỘT file quy định.
-# Có thể đổi tên file tại đây, nhưng không nên cho học viên tự chọn hai tệp
-# độc lập vì rất dễ ghép nhầm quy định của loại này với template của loại khác.
-DOCUMENT_PROFILES = {
-    "master_research": {
-        "label": "Luận văn THS nghiên cứu - NCS - BSCK2",
-        "short_label": "THS nghiên cứu - NCS - BSCK2",
-        "template_file": (
-            "Văn_Luận văn THS nghiên cứu -NCS-BSCK2 "
-            "-Template 2026.docx"
-        ),
-        "template_aliases": [
-            "luan_van_THS_nghien_cuu_NCS_BSCK2.docx",
-            "Văn_Luận văn Thạc sĩ nghiên cứu -Template 2026.docx",
-            "luan_van_thac_si_nghien_cuu.docx",
-        ],
-        "regulation_file": (
-            "quy_dinh_luan_van_THS nghien cuu_NCS_BSCK2.pdf"
-        ),
-        "regulation_aliases": [
-            "quy_dinh_luan_van_THS_nghien_cuu_NCS_BSCK2.pdf",
-            "quy_dinh_luan_van_thac_si_nghien_cuu.pdf",
-        ],
-        "output_file": (
-            "LuanVan_THS_NghienCuu_NCS_BSCK2_DaKiemTra.docx"
-        ),
-    },
-    "master_application": {
-        "label": "Luận văn thạc sĩ định hướng ứng dụng",
-        "short_label": "Thạc sĩ ứng dụng",
-        "template_file": (
-            "Văn_Luận văn Thạc sĩ ứng dụng -Template 2026.docx"
-        ),
+if __name__ == "__main__":
+    main()
